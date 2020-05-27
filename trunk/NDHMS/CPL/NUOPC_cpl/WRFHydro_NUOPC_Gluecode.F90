@@ -64,11 +64,17 @@ module wrfhydro_nuopc_gluecode
 !    config_flags
 !  use module_configure, only: &
 !    model_config_rec
+  use orchestrator_base ! this is a call before land_driver_ini that is pretty new
+  use module_NoahMP_hrldas_driver, only:  land_driver_ini, land_driver_exe  ! now how about noah, should I just leave it out for now
+  use state_module,                only: state_type ! this snow state variable that James has added, should we have it here?
+  use module_hydro_stop,           only: HYDRO_stop ! it was not used in Beheen s work 
+  use config_base,                 only: noah_lsm, nlst  ! Based on comments from Ryan, it is better to work with nlst rather than nlst_rt 
 
   implicit none
 
   private
 
+! TODO: some of these are lishydro specific so need to come back and add the #defif s later
   public :: wrfhydro_nuopc_ini
   public :: wrfhydro_nuopc_run
   public :: wrfhydro_nuopc_fin
@@ -236,7 +242,7 @@ module wrfhydro_nuopc_gluecode
       stateName='snliqv',adImport=.FALSE.,adExport=.TRUE.), & 
     WRFHYDRO_Field( & !(44)
       stdname='surface_water_depth', units='mm', &
-      stateName='sfchead',adImport=.FALSE.,adExport=.TRUE.), &
+      stateName='sfchead',adImport=.TRUE.,adExport=.TRUE.), & ! this is the only variable I would like to brind vales from Coastal model at the moment
     WRFHYDRO_Field( & !(45)
       stdname='time_step_infiltration_excess', units='mm', &
       stateName='infxsrt',adImport=.TRUE.,adExport=.FALSE.), &
@@ -280,12 +286,16 @@ contains
 #undef METHOD
 #define METHOD "wrfhydro_nuopc_ini"
 
-  subroutine wrfhydro_nuopc_ini(did,vm,clock,forcingDir,rc)
+  subroutine wrfhydro_nuopc_ini(did,vm,clock,state,lishydro,forcingDir,rc) !! added state, do I have to??!!! 
+
     integer, intent(in)                     :: did
     type(ESMF_VM),intent(in)                :: vm
     type(ESMF_Clock),intent(in)             :: clock
-    character(len=*)                        :: forcingDir
+    logical, intent(in)                     :: lishydro
+    character(len=*), optional              :: forcingDir
     integer, intent(out)                    :: rc
+
+    type(state_type), intent(out)  :: state ! it is used in the call to land_driver_ini, newly introduce in wrfhydro 
 
     ! local variables
     integer                     :: localPet
@@ -296,6 +306,10 @@ contains
     type(ESMF_Time)             :: startTime
     type(ESMF_TimeInterval)     :: timeStep
     real(ESMF_KIND_R8)          :: dt
+    integer                     :: esmf_comm, nuopc_comm
+    character(20)               :: starttime_str="1111"
+    integer                     :: ntime, itime
+
 #ifdef DEBUG
     character(ESMF_MAXSTR)      :: logMsg
 #endif
@@ -306,12 +320,18 @@ contains
 
     rc = ESMF_SUCCESS
 
+if (lishydro == .TRUE.) then 
     ! Set mpiCommunicator for WRFHYDRO
     call ESMF_VMGet(vm, localPet=localPet, &
       mpiCommunicator=HYDRO_COMM_WORLD, rc=rc)
     if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
     ! Set focing directory
+    if (.not. present(forcingDir)) then
+        call ESMF_LogSetError(ESMF_RC_ARG_BAD, & 
+                              msg=METHOD//": Optional argument 'forcingDir' required but not supplied", &
+                              file=FILENAME, rcToReturn=rc)
+    endif
     indir=forcingDir
 
     ! Get the models timestep
@@ -332,20 +352,21 @@ contains
     nlst_rt(did)%olddate(1:19)   = startTimeStr(1:19)
     nlst_rt(did)%dt = dt
     cpl_outdate = startTimeStr(1:19)
-    nlst_rt(did)%nsoil=4
+
+    nlst_rt(did)%nsoil=4 ! why is it setting the soil separately? is there any specific reasons?
     allocate(nlst_rt(did)%zsoil8(4),stat=stat)
     if (ESMF_LogFoundAllocError(statusToCheck=stat, &
       msg=METHOD//': Allocation of model soil depths memory failed.', &
       file=FILENAME, rcToReturn=rc)) return ! bail out
     nlst_rt(did)%zsoil8(1:4)=(/-0.1,-0.4,-1.0,-2.0/)
-    nlst_rt(did)%geo_static_flnm = "geo_em.d01.nc"
+    nlst_rt(did)%geo_static_flnm = "geo_em.d01.nc" 
     nlst_rt(did)%geo_finegrid_flnm = "fulldom_hires_hydrofile.d01.nc"
     nlst_rt(did)%sys_cpl = 2
     nlst_rt(did)%IGRID = did
     write(nlst_rt(did)%hgrid,'(I1)') did
 
     ! Read information from hydro.namelist config file
-    call read_rt_nlst(nlst_rt(did))
+    call read_rt_nlst(nlst_rt(did)) 
 
 #if DEBUG
     call WRFHYDRO_nlstLog(did,MODNAME,rc=rc)
@@ -513,6 +534,115 @@ contains
     call ESMF_LogWrite(MODNAME//": leaving "//METHOD, ESMF_LOGMSG_INFO)
 #endif
 
+else ! ------------------>Arezoo : From here is caling the normal wrfhydro initialization call <------------------------------------------------
+
+    ! Set mpiCommunicator for WRFHydro
+    call ESMF_VMGet(vm, localPet=localPet, mpiCommunicator=esmf_comm, rc=rc)
+    if (ESMF_STDERRORCHECK(rc)) return  ! bail out
+    !call NWM_VMPrint(vm)
+
+    call MPI_Comm_dup(esmf_comm, nuopc_comm, rc)
+    ! Duplicate the MPI communicator not to interfere with ESMF communications.
+    ! The duplicate MPI communicator can be used in any MPI call in the user
+    ! code. Here the MPI_Barrier() routine is called.
+    call MPI_Barrier(nuopc_comm, rc)
+
+       
+    ! Initialize WRFHydro before setting up fields
+    ! getting back ntime
+    call orchestrator%init()
+    call land_driver_ini(ntime, state, ext_comm = nuopc_comm) 
+
+    ! set the first ith loop to 1
+    ! this is usually set to 1 in the main driver of wrfhydro which is not used in the nuopc cap
+    itime = 1  
+
+    ! Get the model starttime, and timestep from the config file and compare it to the wrfhydro start time and timestep 
+    starttime_str = nlst(did)%olddate
+
+   ! Get the models timestep from the config file?!
+    call ESMF_ClockGet(clock,timestep=timestep,startTime=startTime,rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+    call ESMF_TimeIntervalGet(timestep,s_r8=dt,rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+    call WRFHYDRO_TimeToString(startTime,timestr=startTimeStr,rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+
+
+! Arezoo --> why is Dan doing this here? We could access the nlst_rt(did)%olddate and startdate, I do not get it,
+! Also what is the point of above ESMF_ClockGet call then?!
+    ! Set default namelist values
+    read (startTimeStr(1:4),"(I)")   nlst(did)%START_YEAR
+    read (startTimeStr(6:7),"(I)")   nlst(did)%START_MONTH
+    read (startTimeStr(9:10),"(I)")  nlst(did)%START_DAY
+    read (startTimeStr(12:13),"(I)") nlst(did)%START_HOUR
+    read (startTimeStr(15:16),"(I)") nlst(did)%START_MIN
+    nlst(did)%startdate(1:19) = startTimeStr(1:19)
+    nlst(did)%olddate(1:19)   = startTimeStr(1:19)
+    nlst(did)%dt = dt  ! dan is replacing dt from the namelist with driver dt
+    cpl_outdate = startTimeStr(1:19)
+
+
+    ! compare to make sure nems config and wrfhydro time 
+    if( (startTimeStr .ne. starttime_str) .or. &
+        (nlst(did)%dt .ne. dt)) then
+      rc = ESMF_FAILURE
+      call hydro_stop("ERROR: Start Time or Noah Timestep Between NEMS And WRFHydro Config Failed.")
+      call ESMF_LogSetError(ESMF_RC_ARG_OUTOFRANGE, &
+                            msg=METHOD//": Comparison Between NEMS And WRFHydro Config Failed!", &
+                            file=FILENAME,rcToReturn=rc)
+      if(ESMF_STDERRORCHECK(rc)) return  ! bail out
+    else
+      rc = ESMF_SUCCESS
+#ifdef DEBUG
+      write (logMsg,"(A)") MODNAME//": Comparison NEMS And WRFhydro Config Succeeded."//METHOD
+      call ESMF_LogWrite(trim(logMsg), ESMF_LOGMSG_INFO)
+#endif
+
+    endif
+
+    ! Broadcasts a contiguous data array from rootPet to all other PETs of
+    ! the ESMF_VM object. root_pet = IO_id = pet0 on 1st node.
+    call ESMF_VMBroadcast(vm, startx, count=numprocs, rootPet=IO_id, rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+    call ESMF_VMBroadcast(vm, starty, count=numprocs, rootPet=IO_id, rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+    call ESMF_VMBroadcast(vm, local_nx_size, count=numprocs, rootPet=IO_id, rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+    call ESMF_VMBroadcast(vm, local_ny_size, count=numprocs, rootPet=IO_id, rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+
+    call get_file_dimension(fileName=nlst(did)%geo_static_flnm,&
+      ix=nx_global(1),jx=ny_global(1))
+
+#ifdef DEBUG
+    write (logMsg,"(A,2(I0,A))") MODNAME//": Global Dimensions = (", &
+      nx_global(1),",",ny_global(1),")"
+    call ESMF_LogWrite(trim(logMsg), ESMF_LOGMSG_INFO)
+#endif
+
+    allocate(deBlockList(2,2,numprocs))
+    do i = 1, numprocs
+      deBlockList(:,1,i) = (/startx(i),starty(i)/)
+      deBlockList(:,2,i) = (/startx(i)+local_nx_size(i)-1, &
+                             starty(i)+local_ny_size(i)-1/)
+    enddo
+
+    ! Create DistGrid based on WRFHDYRO Config NX,NY
+    WRFHYDRO_distgrid = ESMF_DistGridCreate( &
+      minIndex=(/1,1/), maxIndex=(/nx_global(1),ny_global(1)/), &
+     deBlockList=deBlockList, &
+      rc=rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+
+    deallocate(deBlockList)
+
+    ! Get the Local Decomp Incides
+    call set_local_indices(rc)
+    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+
+
+endif
   end subroutine
 
   !-----------------------------------------------------------------------------
@@ -520,12 +650,15 @@ contains
 #undef METHOD
 #define METHOD "wrfhydro_nuopc_run"
 
-  subroutine wrfhydro_nuopc_run(did,mode,clock,importState,exportState,rc)
+  subroutine wrfhydro_nuopc_run(did,mode,clock,state,itime,importState,exportState,lishydro,rc) 
     integer, intent(in)                     :: did
-    integer, intent(in)                     :: mode
+    integer, optional                       :: mode 
     type(ESMF_Clock),intent(in)             :: clock
+    type(state_type)                        :: state 
+    integer, intent(inout), optional        :: itime
     type(ESMF_State),intent(inout)          :: importState
     type(ESMF_State),intent(inout)          :: exportState
+    logical, intent(in)                     :: lishydro
     integer, intent(out)                    :: rc
 
     ! local variables
@@ -536,6 +669,8 @@ contains
 #endif
 
     rc = ESMF_SUCCESS
+
+if (lishydro == .TRUE.) then 
 
     if(.not. RT_DOMAIN(did)%initialized) then
       call ESMF_LogSetError(ESMF_RC_ARG_OUTOFRANGE, &
@@ -603,6 +738,8 @@ contains
         ESMF_LOGMSG_INFO)
     else
 
+      if (.not. present(mode)) mode = -1
+      
       select case (mode)
         case (WRFHYDRO_Offline)
           call read_ldasout(olddate=nlst_rt(did)%olddate(1:19), &
@@ -642,6 +779,17 @@ contains
 #ifdef DEBUG
     call ESMF_LogWrite(MODNAME//": leaving "//METHOD, ESMF_LOGMSG_INFO)
 #endif
+
+else 
+    if (.not. present(itime)) then
+        call ESMF_LogSetError(ESMF_RC_ARG_BAD, & 
+                              msg=METHOD//": Optional argument 'itime' required but not supplied", &
+                              file=FILENAME, rcToReturn=rc)
+    endif
+
+    call land_driver_exe(itime, state)
+
+endif
 
   end subroutine
 
@@ -835,7 +983,7 @@ contains
 
     rc = ESMF_SUCCESS
 
-    WRFHYDRO_GridCreate = ESMF_GridCreate(name='WRFHYDRO_Grid_'//trim(nlst_rt(did)%hgrid), &
+    WRFHYDRO_GridCreate = ESMF_GridCreate(name='WRFHYDRO_Grid_'//trim(nlst(did)%hgrid), &
       distgrid=WRFHYDRO_DistGrid, coordSys = ESMF_COORDSYS_SPH_DEG, &
       coordTypeKind=ESMF_TYPEKIND_COORD, &
 !      gridEdgeLWidth=(/0,0/), gridEdgeUWidth=(/0,1/), &
@@ -843,13 +991,12 @@ contains
     if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
     ! CENTERS
-
     ! Get Local Latitude (lat)
     allocate(latitude(nx_local,ny_local),stat=stat)
     if (ESMF_LogFoundAllocError(statusToCheck=stat, &
       msg=METHOD//': Allocation of latitude memory failed.', &
       file=FILENAME, rcToReturn=rc)) return ! bail out
-    call WRFHYDRO_ESMF_NetcdfReadIXJX("XLAT_M",nlst_rt(did)%geo_static_flnm, &
+    call WRFHYDRO_ESMF_NetcdfReadIXJX("XLAT_M",nlst(did)%geo_static_flnm, &
       (/x_start,y_start/),latitude,rc=rc)
     if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
@@ -858,7 +1005,7 @@ contains
     if (ESMF_LogFoundAllocError(statusToCheck=stat, &
       msg=METHOD//': Allocation of longitude memory failed.', &
       file=FILENAME, rcToReturn=rc)) return ! bail out
-    call WRFHYDRO_ESMF_NetcdfReadIXJX("XLONG_M",nlst_rt(did)%geo_static_flnm, &
+    call WRFHYDRO_ESMF_NetcdfReadIXJX("XLONG_M",nlst(did)%geo_static_flnm, &
       (/x_start,y_start/),longitude,rc=rc)
     if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
@@ -900,7 +1047,7 @@ contains
     if (ESMF_LogFoundAllocError(statusToCheck=stat, &
       msg=METHOD//': Allocation of mask memory failed.', &
       file=FILENAME, rcToReturn=rc)) return ! bail out
-    call WRFHYDRO_ESMF_NetcdfReadIXJX("LANDMASK",nlst_rt(did)%geo_static_flnm, &
+    call WRFHYDRO_ESMF_NetcdfReadIXJX("LANDMASK",nlst(did)%geo_static_flnm, &
       (/x_start,y_start/),mask,rc=rc)
     if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
@@ -931,12 +1078,12 @@ contains
     ! The original WPS implementation used the _CORNER names
     ! but it was then changes to the _C names.  Support both
     ! options.
-    if (WRFHYDRO_ESMF_NetcdfIsPresent("XLAT_CORNER",nlst_rt(did)%geo_static_flnm) .AND. &
-         WRFHYDRO_ESMF_NetcdfIsPresent("XLONG_CORNER",nlst_rt(did)%geo_static_flnm)) then
+    if (WRFHYDRO_ESMF_NetcdfIsPresent("XLAT_CORNER",nlst(did)%geo_static_flnm) .AND. &
+         WRFHYDRO_ESMF_NetcdfIsPresent("XLONG_CORNER",nlst(did)%geo_static_flnm)) then
        xlat_corner_name = "XLAT_CORNER"
        xlon_corner_name = "XLONG_CORNER"
-    else if (WRFHYDRO_ESMF_NetcdfIsPresent("XLAT_C",nlst_rt(did)%geo_static_flnm) .AND. &
-         WRFHYDRO_ESMF_NetcdfIsPresent("XLONG_C",nlst_rt(did)%geo_static_flnm)) then
+    else if (WRFHYDRO_ESMF_NetcdfIsPresent("XLAT_C",nlst(did)%geo_static_flnm) .AND. &
+         WRFHYDRO_ESMF_NetcdfIsPresent("XLONG_C",nlst(did)%geo_static_flnm)) then
        xlat_corner_name = "XLAT_C"
        xlon_corner_name = "XLONG_C"
     else
@@ -950,7 +1097,7 @@ contains
       if (ESMF_LogFoundAllocError(statusToCheck=stat, &
         msg=METHOD//': Allocation of corner latitude memory failed.', &
         file=FILENAME, rcToReturn=rc)) return ! bail out
-      call WRFHYDRO_ESMF_NetcdfReadIXJX(trim(xlat_corner_name),nlst_rt(did)%geo_static_flnm, &
+      call WRFHYDRO_ESMF_NetcdfReadIXJX(trim(xlat_corner_name),nlst(did)%geo_static_flnm, &
         (/x_start,y_start/),latitude,rc=rc)
       if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
@@ -959,7 +1106,7 @@ contains
       if (ESMF_LogFoundAllocError(statusToCheck=stat, &
        msg=METHOD//': Allocation of corner longitude memory failed.', &
        file=FILENAME, rcToReturn=rc)) return ! bail out
-      call WRFHYDRO_ESMF_NetcdfReadIXJX(trim(xlon_corner_name),nlst_rt(did)%geo_static_flnm, &
+      call WRFHYDRO_ESMF_NetcdfReadIXJX(trim(xlon_corner_name),nlst(did)%geo_static_flnm, &
         (/x_start,y_start/),longitude,rc=rc)
       if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
