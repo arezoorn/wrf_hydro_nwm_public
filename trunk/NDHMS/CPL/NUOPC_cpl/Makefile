@@ -79,10 +79,24 @@ MODEL_LIBDIR := $(abspath $(MODEL_DIR)/lib)
 MODEL_MODDIR := $(abspath $(MODEL_DIR)/mod)
 MODEL_MPPDIR := $(abspath $(MODEL_DIR)/MPP)
 MODEL_RTGDIR := $(abspath $(MODEL_DIR)/Routing)
+NOAHMP_MAINDIR := $(abspath $(MODEL_DIR)/Land_models/NoahMP/IO_code/)
+NOAHMP_UTILDIR := $(abspath $(MODEL_DIR)/Land_models/NoahMP/Utility_routines/)
+NOAHMP_PHYSDIR := $(abspath $(MODEL_DIR)/Land_models/NoahMP/phys/)
 
 MODEL_MK     := $(abspath $(MODEL_MKDIR)/Makefile.comm)
 MODEL_MKINC  := $(abspath $(MODEL_DIR)/macros)
 MODEL_LIB    := $(abspath $(MODEL_LIBDIR)/libHYDRO.a)
+
+# TODO: these probably ought to be pre-combined into something like libHRLDAS.a
+HRLDAS_LIBS  := $(abspath $(NOAHMP_MAINDIR)/module_NoahMP_hrldas_driver.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_MAINDIR)/module_hrldas_netcdf_io.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_UTILDIR)/module_date_utilities.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_UTILDIR)/module_wrf_utilities.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_UTILDIR)/kwm_string_utilities.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_PHYSDIR)/module_sf_noahmpdrv.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_PHYSDIR)/module_sf_noahmplsm.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_PHYSDIR)/module_sf_noahmp_glacier.o)
+HRLDAS_LIBS  += $(abspath $(NOAHMP_PHYSDIR)/module_sf_noahmp_groundwater.o)
 
 MODEL_MODS   := $(abspath $(MODEL_MPPDIR)/module_mpp_land.mod)
 MODEL_MODS   += $(abspath $(MODEL_MPPDIR)/module_cpl_land.mod)
@@ -93,6 +107,8 @@ MODEL_MODS   += $(abspath $(MODEL_MODDIR)/module_hydro_io.mod)
 MODEL_MODS   += $(abspath $(MODEL_MODDIR)/module_lsm_forcing.mod)
 MODEL_MODS   += $(abspath $(MODEL_RTGDIR)/Overland/overland_data.mod)
 MODEL_MODS   += $(abspath $(MODEL_RTGDIR)/Overland/overland_control.mod)
+MODEL_MODS   += $(abspath $(NOAHMP_MAINDIR)/module_noahmp_hrldas_driver.mod)
+
 
 MODEL_FILES  := $(MODEL_LIB) $(MODEL_MODS)
 
@@ -123,14 +139,20 @@ CAP_FILES     := $(CAP_OBJS) $(CAP_MODS) $(CAP_LIB) $(CAP_VERS) $(CAP_MK)
 include $(MODEL_MKINC)
 override ESMF_F90COMPILEPATHS    += -I$(MODEL_MODDIR)
 override ESMF_F90COMPILEPATHS    += -I$(MODEL_MPPDIR)
+override ESMF_F90COMPILEPATHS    += -I$(NOAHMP_MAINDIR)
+override ESMF_F90COMPILEPATHS    += -I$(NOAHMP_UTILDIR)
+override ESMF_F90COMPILEPATHS    += -I$(NOAHMP_PHYSDIR)
+
 override ESMF_F90COMPILECPPFLAGS += $(HYDRO_D)
 
 # #######################
 # Primary Makefile Target
 # #######################
-.PHONY: nuopc nuopcinstall nuopcdistclean nuopcclean install_mk
-
+.PHONY: clean nuopc nuopcinstall nuopcdistclean nuopcclean install_mk
 nuopc: $(CAP_FILES)
+
+clean:
+	rm -f *.o *.a *.mod
 
 nuopcinstall: $(CAP_LIB) $(CAP_MODS) $(CAP_VERS) \
  $(addprefix $(INSTPATH)/,$(CAP_LIB)) \
@@ -206,7 +228,7 @@ $(CAP_LIB): $(MODEL_LIB) $(CAP_OBJS)
 	@echo
 	$(call checkfile, $(MODEL_LIB))
 	cp $(MODEL_LIB) $@
-	ar cr $@ $(CAP_OBJS)
+	ar cr $@ $(HRLDAS_LIBS) $(CAP_OBJS)
 
 $(CAP_VERS):
 	@echo $(HR)
