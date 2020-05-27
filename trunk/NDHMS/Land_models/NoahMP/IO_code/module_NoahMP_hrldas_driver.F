@@ -396,7 +396,7 @@ module module_NoahMP_hrldas_driver
 
   contains
 
-  subroutine land_driver_ini(NTIME_out, state, wrfits,wrfite,wrfjts,wrfjte)
+  subroutine land_driver_ini(NTIME_out, state, wrfits,wrfite,wrfjts,wrfjte, ext_comm)
      use module_HYDRO_drv, only: HYDRO_ini
      use config_base, only: nlst
      use module_rt_data, only: rt_domain
@@ -409,9 +409,13 @@ module module_NoahMP_hrldas_driver
      type(state_type) :: state
 
     ! initilization for stand alone parallel code.
-    integer, optional, intent(in) :: wrfits,wrfite,wrfjts,wrfjte
+    integer, optional, intent(in) :: wrfits,wrfite,wrfjts,wrfjte, ext_comm
 #ifdef MPP_LAND
-    call  MPP_LAND_INIT()
+    if (present(ext_comm)) then
+       call  MPP_LAND_INIT(ext_comm)
+    else
+       call  MPP_LAND_INIT()
+    endif
 #endif
 
 #ifdef WRF_HYDRO
@@ -617,12 +621,17 @@ module module_NoahMP_hrldas_driver
      xend = (wrfite-1) * wrf_hydro%finemesh_factor
      ystart = (wrfjts-1) * wrf_hydro%finemesh_factor + 1
      yend = (wrfjte-1) * wrf_hydro%finemesh_factor
-     call CPL_LAND_INIT(xstart,xend, ystart,yend)
+     if (present(ext_comm)) then
+        call CPL_LAND_INIT(xstart,xend, ystart,yend, ext_comm = ext_comm)
+     else
+        call CPL_LAND_INIT(xstart,xend, ystart,yend)
+     endif
      ix_tmp = xend - xstart + 1
      jx_tmp = yend - ystart + 1
 
     else
 #endif
+
        call read_dim(noah_lsm%hrldas_setup_file,ix_tmp,jx_tmp)
        call MPP_LAND_PAR_INI(1,ix_tmp,jx_tmp,1)
        call getLocalXY(ix_tmp,jx_tmp,noah_lsm%xstart,noah_lsm%ystart,noah_lsm%xend,noah_lsm%yend)
