@@ -240,6 +240,7 @@ module WRFHydro_NUOPC
     model_label_Finalize    => label_Finalize
   use WRFHYDRO_NUOPC_Gluecode
   use WRFHydro_ESMF_Extensions
+  use state_module, only: state_type
 
   implicit none
 
@@ -250,6 +251,7 @@ module WRFHydro_NUOPC
   CHARACTER(LEN=*), PARAMETER :: label_InternalState = 'InternalState'
 
   type type_InternalStateStruct
+    logical                  :: lishydro         = .FALSE.
     logical                  :: realizeAllExport = .FALSE.
     character(len=64)        :: configFile       = 'hydro.namelist'
     character(len=64)        :: dasConfigFile    = 'namelist.hrldas'
@@ -271,6 +273,7 @@ module WRFHydro_NUOPC
     type(ESMF_State)         :: NStateImp(1)
     type(ESMF_State)         :: NStateExp(1)
     integer                  :: mode(1)    = WRFHYDRO_Unknown
+    type(state_type)         :: state         ! state passed in land_driver_ini and land_driver_run, it is not information coming from the config file so maybe not appropriate to have it here
   endtype
 
   type type_InternalState
@@ -435,6 +438,14 @@ module WRFHydro_NUOPC
         if (ESMF_STDERRORCHECK(rc)) return  ! bail out
       endif
 
+
+      ! Determine If listhydro is on and off
+      call ESMF_AttributeGet(gcomp, name="lishydro", &
+        value=value, defaultValue="false", &
+        convention="NUOPC", purpose="Instance", rc=rc)
+      if (ESMF_STDERRORCHECK(rc)) return  ! bail out
+      is%wrap%lishydro = (trim(value)=="true")
+
       ! Realize all export fields
       call ESMF_AttributeGet(gcomp, name="realize_all_export", value=value, &
         defaultValue="false", convention="NUOPC", purpose="Instance", rc=rc)
@@ -533,6 +544,9 @@ module WRFHydro_NUOPC
 
       if (btest(verbosity,16)) then
         call ESMF_LogWrite(trim(cname)//": Settings",ESMF_LOGMSG_INFO)
+        write (logMsg, "(A,(A,L1))") trim(cname)//': ', &
+          "lishdyro               = ",is%wrap%lishydro
+        call ESMF_LogWrite(trim(logMsg),ESMF_LOGMSG_INFO)
         write (logMsg, "(A,(A,I0))") trim(cname)//": ", &
           "Verbosity              = ",verbosity
         call ESMF_LogWrite(trim(logMsg),ESMF_LOGMSG_INFO)
@@ -633,8 +647,13 @@ module WRFHydro_NUOPC
     call ESMF_GridCompGet(gcomp, vm=vm, rc=rc)
     if(ESMF_STDERRORCHECK(rc)) return ! bail out
 
-    call wrfhydro_nuopc_ini(is%wrap%did,vm,clock,is%wrap%forcingDir,rc=rc)
-    if(ESMF_STDERRORCHECK(rc)) return ! bail out
+    if (is%wrap%lishydro == .TRUE.) then 
+        call wrfhydro_nuopc_ini(did = is%wrap%did, vm = vm, state = is%wrap%state, clock = clock, lishydro = .true., forcingDir = is%wrap%forcingDir, rc=rc)  
+        if(ESMF_STDERRORCHECK(rc)) return ! bail out
+   else 
+        call wrfhydro_nuopc_ini(did = is%wrap%did, vm = vm, state = is%wrap%state, clock = clock, lishydro = .false., rc=rc) ! for now we keep two seprate call here 
+        if(ESMF_STDERRORCHECK(rc)) return ! bail out
+   endif
 
     ! get hgrid for domain id
     call WRFHYDRO_get_hgrid(is%wrap%did,is%wrap%hgrid,rc=rc)
@@ -804,6 +823,7 @@ module WRFHydro_NUOPC
         rname//'_grid_D'//trim(nStr)//".nc", rc=rc)
       if (ESMF_STDERRORCHECK(rc)) return  ! bail out
     endif
+!endif
 
     do fIndex = 1, size(WRFHYDRO_FieldList)
       if (WRFHYDRO_FieldList(fIndex)%adImport) then
@@ -1313,6 +1333,7 @@ subroutine CheckImport(gcomp, rc)
     character(len=32)           :: currTimeStr, advEndTimeStr
     type(ESMF_TimeInterval)     :: timeStep
     character(len=9)            :: nStr
+    integer                     :: itime
 
     rc = ESMF_SUCCESS
 
@@ -1375,13 +1396,28 @@ subroutine CheckImport(gcomp, rc)
     call ESMF_ClockGet(is%wrap%clock(1),timeStep=timestep,rc=rc)
     if (ESMF_STDERRORCHECK(rc)) return  ! bail out
 
+    ! let s set the itime to 1 
+    itime = 0  ! not used in the case of lishydro
+
     do while (is%wrap%stepTimer(1) >= timestep)
+
       ! call wrfhydro advance
       if (btest(verbosity,16)) then
         call LogAdvance(nIndex=1,nStr=nStr)
       endif
-      call wrfhydro_nuopc_run(is%wrap%did,is%wrap%mode(1), &
-        is%wrap%clock(1),is%wrap%NStateImp(1),is%wrap%NStateExp(1),rc)
+
+      if (is%wrap%lishydro == .TRUE.) then ! we probably could use only one call but I am being explicit here 
+        call wrfhydro_nuopc_run(did = is%wrap%did, mode = is%wrap%mode(1), &
+          clock = is%wrap%clock(1),state = is%wrap%state, importState = is%wrap%NStateImp(1), &
+          exportState = is%wrap%NStateExp(1), lishydro = is%wrap%lishydro, rc = rc)
+      else 
+        ! go to next iteration
+        itime = itime + 1
+        call wrfhydro_nuopc_run(did = is%wrap%did, &
+          clock = is%wrap%clock(1),state = is%wrap%state, itime = itime, importState = is%wrap%NStateImp(1), &
+          exportState = is%wrap%NStateExp(1), lishydro = is%wrap%lishydro, rc = rc)
+      endif 
+
       if(ESMF_STDERRORCHECK(rc)) return ! bail out
       call ESMF_ClockAdvance(is%wrap%clock(1),rc=rc)
         if (ESMF_STDERRORCHECK(rc)) return  ! bail out
