@@ -23,7 +23,7 @@ module module_HYDRO_io
 #ifdef MPP_LAND
      use module_mpp_land
      use module_mpp_reachls,  only: ReachLS_decomp, reachls_wreal, ReachLS_write_io, &
-                                    ReachLS_wInt, reachls_wreal2, TONODE2RSL, gbcastvalue
+                                    ReachLS_wInt, reachls_wreal2, TONODE2RSL, TONODE2RSL8, gbcastvalue
      use MODULE_mpp_GWBUCKET, only: gw_write_io_real, gw_write_io_int
 #endif
    use Module_Date_utilities_rt, only: geth_newdate
@@ -35,6 +35,7 @@ module module_HYDRO_io
    use netcdf
    use module_hydro_stop, only:HYDRO_stop
    use hashtable
+   use iso_fortran_env, only: int64
 
    implicit none
 
@@ -623,7 +624,7 @@ end subroutine get_albedo12m_netcdf
     character(len=*), intent(in) :: name
     integer, intent(in) :: ncid
     integer, intent(in) :: idim, jdim
-    real, dimension(idim,jdim), intent(out) :: array
+    real, dimension(idim,jdim), intent(inout) :: array
     character(len=256), intent(out) :: units
     ! fatal_IF_ERROR:  an input code value:
     !      .TRUE. if an error in reading the data should stop the program.
@@ -725,7 +726,7 @@ end subroutine get_albedo12m_netcdf
         INTEGER, DIMENSION(IXRT,JXRT)                :: DIRECTION  !- flow direction
         INTEGER, DIMENSION(IXRT,JXRT)                :: LAKE_MSKRT
         REAL, DIMENSION(IXRT,JXRT)                   :: LAT, LON
-        INTEGER, DIMENSION(IXRT,JXRT)                :: CH_LNKRT   !- link routing ID
+        INTEGER(kind=int64), DIMENSION(IXRT,JXRT)                :: CH_LNKRT   !- link routing ID
         integer, INTENT(IN)                          :: UDMP_OPT
         integer                                      :: NLAKES
 
@@ -775,7 +776,7 @@ end subroutine get_albedo12m_netcdf
 #endif
 !!!! LINKID is used for reach based method.  ?
      IF(channel_option.ne.3 .and. UDMP_OPT.ne.1) then  !get maxnodes and links from grid
-         call readRT2d_int(var_name,CH_LNKRT,ixrt,jxrt,&
+         call readRT2d_int8(var_name,CH_LNKRT,ixrt,jxrt,&
                    trim(geo_finegrid_flnm), fatalErr=.TRUE.)
      endif
 
@@ -1187,7 +1188,57 @@ end subroutine get_albedo12m_netcdf
         end do
 #endif
      end SUBROUTINE nreadRT2d_int
-!---------------------------------------------------------
+
+
+     subroutine nreadRT2d_int8(var_name, inv, ixrt, jxrt, fileName, fatalErr)
+         implicit none
+         INTEGER, INTENT(IN) :: ixrt,jxrt
+         INTEGER :: i, j, ii,jj, iret
+         CHARACTER(len=*):: var_name,fileName
+         integer(kind=int64), INTENT(OUT), dimension(ixrt,jxrt) :: inv
+         integer(kind=int64), dimension(ixrt,jxrt) :: inv_tmp
+         logical, optional, intent(in) :: fatalErr
+         logical :: fatalErr_local
+#ifdef MPP_LAND
+     integer(kind=int64), allocatable,dimension(:,:) :: g_inv_tmp, g_inv
+#endif
+         fatalErr_local = .FALSE.
+         if(present(fatalErr)) fatalErr_local=fatalErr
+
+#ifdef MPP_LAND
+     if(my_id .eq. io_id) then
+          allocate(g_inv_tmp(global_rt_nx,global_rt_ny))
+          allocate(g_inv(global_rt_nx,global_rt_ny))
+          g_inv_tmp = -9999.9
+          call  get2d_int8(var_name,g_inv_tmp,global_rt_nx,global_rt_ny,&
+                 trim(fileName), fatalErr=fatalErr_local)
+
+          jj = global_rt_ny
+          do j = 1, global_rt_ny
+             g_inv(:,j) = g_inv_tmp(:,jj)
+             jj = global_rt_ny - j
+          end do
+     else
+          allocate(g_inv_tmp(1,1))
+          allocate(g_inv(1,1))
+     endif
+     call decompose_RT_int8(g_inv,inv,global_rt_nx,global_rt_ny,IXRT,JXRT)
+     if(allocated(g_inv_tmp)) deallocate(g_inv_tmp)
+     if(allocated(g_inv)) deallocate(g_inv)
+#else
+         call  get2d_int(var_name,inv_tmp,ixrt,jxrt,&
+                 trim(fileName), fatalErr=fatalErr_local)
+         do i=1,ixrt
+             jj=jxrt
+             do j=1,jxrt
+                 inv(i,j)=inv_tmp(i,jj)
+                 jj=jxrt-j
+             end do
+         end do
+#endif
+     end SUBROUTINE nreadRT2d_int8
+
+         !---------------------------------------------------------
 !DJG -----------------------------------------------------
 
      subroutine readRT2d_real(var_name, inv, ixrt, jxrt, fileName, fatalErr)
@@ -1235,6 +1286,28 @@ end subroutine get_albedo12m_netcdf
          end do
 
      end SUBROUTINE readRT2d_int
+
+     subroutine readRT2d_int8(var_name, inv, ixrt, jxrt, fileName, fatalErr)
+         implicit none
+         INTEGER, INTENT(IN) :: ixrt,jxrt
+         INTEGER :: i, j, ii,jj
+         CHARACTER(len=*):: var_name,fileName
+         integer(kind=int64), INTENT(OUT), dimension(ixrt,jxrt) :: inv
+         integer(kind=int64), dimension(ixrt,jxrt) :: inv_tmp
+         logical, optional, intent(in) :: fatalErr
+         logical :: fatalErr_local
+         fatalErr_local = .FALSE.
+         if(present(fatalErr)) fatalErr_local=fatalErr
+         call  get2d_int8(var_name,inv_tmp,ixrt,jxrt,&
+                 trim(fileName), fatalErr=fatalErr_local)
+
+         jj = jxrt
+         do j = 1, jxrt
+             inv(:,j) = inv_tmp(:,jj)
+             jj = jxrt - j
+         end do
+
+     end SUBROUTINE readRT2d_int8
 
 !---------------------------------------------------------
 !DJG -----------------------------------------------------
@@ -1375,7 +1448,7 @@ end subroutine get_albedo12m_netcdf
       implicit none
       integer, intent(in) :: ixrt,jxrt, numbasns
       integer, dimension(:,:) :: gw_strm_msk, gw_strm_msk_lind
-      integer, dimension(:) :: basnsInd
+      integer(kind=int64), dimension(:) :: basnsInd
       integer:: i,j,k,bas
       gw_strm_msk_lind = -999
       do j = 1, jxrt
@@ -1399,7 +1472,7 @@ end subroutine get_albedo12m_netcdf
      integer, intent(in),dimension(ix,jx) ::  GWSUBBASMSK
      integer, intent(out):: gnumbasns
      integer, intent(inout):: numbasns
-     integer, intent(inout),allocatable,dimension(:):: basnsInd
+     integer(kind=int64), intent(inout),allocatable,dimension(:):: basnsInd
 
      integer,dimension(numbasns):: tmpbuf
 
@@ -1444,7 +1517,7 @@ end subroutine get_albedo12m_netcdf
 
    implicit none
    integer, intent(in) :: gnumbasns, numbasns
-   integer, intent(in),  dimension(numbasns) :: basnsInd
+   integer(kind=int64), intent(in),  dimension(numbasns) :: basnsInd
    real,    intent(out), dimension(numbasns) :: gw_buck_coeff, gw_buck_exp, gw_buck_loss
    real,    intent(out), dimension(numbasns) :: z_max, z_gwsubbas, basns_area
    integer, intent(out), dimension(numbasns) :: bas_id
@@ -4715,7 +4788,7 @@ end subroutine mpp_output_chrt
      real, dimension(NLAKES),                  intent(inout) :: latlake,lonlake,elevlake,resht
      real, dimension(NLAKES),                  intent(inout) :: qlakei,qlakeo  !-- inflow and outflow of lake
      real,                                     intent(in) :: dtrt_ch
-     integer, dimension(NLAKES),               intent(in) :: LAKEIDM     ! lake id
+     integer(kind=int64), dimension(NLAKES),       intent(in) :: LAKEIDM     ! lake id
 
      character(len=*),                         intent(in) :: startdate
      character(len=*),                         intent(in) :: date
@@ -5008,7 +5081,7 @@ end subroutine mpp_output_chrt
      integer,                                  intent(in) :: NLAKES
      real, dimension(NLAKES),                  intent(in) :: latlake,lonlake,elevlake,resht
      real, dimension(NLAKES),                  intent(in) :: qlakei,qlakeo  !-- inflow and outflow of lake
-     integer, dimension(NLAKES),               intent(in) :: LAKEIDM        !-- LAKE ID
+     integer(kind=int64), dimension(NLAKES),       intent(in) :: LAKEIDM        !-- LAKE ID
      real,                                     intent(in) :: dtrt_ch
 
      character(len=*),                         intent(in) :: startdate
@@ -5170,14 +5243,14 @@ end subroutine mpp_output_chrt
      integer,                                  intent(in) :: NLINKS,ixrt,jxrt
      real,                                     intent(in) :: dt
      real, dimension(:,:),                intent(in) :: qlink
-     integer, dimension(IXRT,JXRT),            intent(in) :: CH_NETLNK_in
+     integer(kind=int64), dimension(IXRT,JXRT),            intent(in) :: CH_NETLNK_in
      character(len=*),          intent(in)     :: geo_finegrid_flnm
      character(len=*),                         intent(in) :: startdate
      character(len=*),                         intent(in) :: date
 
      integer::  gnlinks , map_l2g(nlinks)
 
-     integer, allocatable,dimension(:,:)         :: CH_NETLNK
+     integer(kind=int64), allocatable,dimension(:,:)         :: CH_NETLNK
      real, allocatable,dimension(:,:)                :: g_qlink
 
      if(my_id .eq. io_id) then
@@ -5191,7 +5264,7 @@ end subroutine mpp_output_chrt
      call write_chanel_real(qlink(:,1),map_l2g,gnlinks,nlinks,g_qlink(:,1))
      call write_chanel_real(qlink(:,2),map_l2g,gnlinks,nlinks,g_qlink(:,2))
 
-     call write_IO_rt_int(CH_NETLNK_in, CH_NETLNK)
+     call write_IO_rt_int8(CH_NETLNK_in, CH_NETLNK)
 
     if(my_id.eq.IO_id) then
         call  output_chrtgrd(igrid, split_output_count, g_ixrt,g_jxrt, &
@@ -5215,7 +5288,7 @@ end subroutine mpp_output_chrt
      integer,                                  intent(in) :: NLINKS,ixrt,jxrt
      real,                                     intent(in) :: dt
      real, dimension(:,:),                intent(in) :: qlink
-     integer, dimension(IXRT,JXRT),            intent(in) :: CH_NETLNK
+     integer(kind=int64), dimension(IXRT,JXRT), intent(in) :: CH_NETLNK
      character(len=*),          intent(in)     :: geo_finegrid_flnm
      character(len=*),                         intent(in) :: startdate
      character(len=*),                         intent(in) :: date
@@ -5430,6 +5503,52 @@ end subroutine mpp_output_chrt
     return
   end subroutine get2d_int
 
+    subroutine get2d_int8(var_name,out_buff,ix,jx,fileName, fatalErr)
+        implicit none
+        integer :: iret,varid,ncid,ix,jx
+        integer(kind=int64) out_buff(ix,jx)
+        character(len=*), intent(in) :: var_name
+        character(len=*), intent(in) :: fileName
+        logical, optional, intent(in) :: fatalErr
+        logical :: fatalErr_local
+        character(len=256) :: errMsg
+
+        fatalErr_local = .false.
+        if(present(fatalErr)) fatalErr_local=fatalErr
+
+        iret = nf90_open(trim(fileName), NF90_NOWRITE, ncid)
+        if (iret .ne. 0) then
+            errMsg = "get2d_int: failed to open the netcdf file: " // trim(fileName)
+            print*, trim(errMsg)
+            if(fatalErr_local) call hydro_stop(trim(errMsg))
+        endif
+
+        iret = nf90_inq_varid(ncid,trim(var_name),  varid)
+        if(iret .ne. 0) then
+            errMsg = "get2d_int: failed to find the variable: " // &
+                    trim(var_name) // ' in ' // trim(fileName)
+            print*, trim(errMsg)
+            if(fatalErr_local) call hydro_stop(errMsg)
+        endif
+
+        iret = nf90_get_var(ncid, varid, out_buff)
+        if(iret .ne. 0) then
+            errMsg = "get2d_int: failed to read the variable: " // &
+                    trim(var_name) // " in " //trim(fileName)
+            print*,trim(errMsg)
+            if(fatalErr_local) call hydro_stop(trim(errMsg))
+        endif
+
+        iret = nf90_close(ncid)
+        if(iret .ne. 0) then
+            errMsg = "get2d_int: failed to close the file: " // &
+                    trim(fileName)
+            print*,trim(errMsg)
+            if(fatalErr_local) call hydro_stop(trim(errMsg))
+        endif
+
+        return
+    end subroutine get2d_int8
 
 #ifdef MPP_LAND
       SUBROUTINE MPP_READ_ROUTEDIM(did,g_IXRT,g_JXRT, GCH_NETLNK,GNLINKS,IXRT,JXRT, &
@@ -5522,17 +5641,20 @@ end subroutine mpp_output_chrt
 #endif
 
       SUBROUTINE READ_ROUTING_seq(IXRT,JXRT,ELRT,CH_NETRT,CH_LNKRT,LKSATFAC,route_topo_f,    &
-            route_chan_f, geo_finegrid_flnm,OVROUGHRTFAC,RETDEPRTFAC,channel_option, UDMP_OPT)
+            route_chan_f, geo_finegrid_flnm,OVROUGHRTFAC,RETDEPRTFAC,IMPERVFRAC, &
+            channel_option, UDMP_OPT, imperv_adj)
 
 
         INTEGER, INTENT(IN) :: IXRT,JXRT
         REAL, INTENT(INOUT), DIMENSION(IXRT,JXRT) :: ELRT,LKSATFAC
-        INTEGER, INTENT(INOUT), DIMENSION(IXRT,JXRT) :: CH_NETRT,CH_LNKRT
+        INTEGER, INTENT(INOUT), DIMENSION(IXRT,JXRT) :: CH_NETRT
+        INTEGER(kind=int64), INTENT(INOUT), DIMENSION(IXRT,JXRT) :: CH_LNKRT
 !Dummy inverted grids
         REAL, INTENT(INOUT), DIMENSION(IXRT,JXRT) :: OVROUGHRTFAC
         REAL, INTENT(INOUT), DIMENSION(IXRT,JXRT) :: RETDEPRTFAC
+        REAL, INTENT(INOUT), DIMENSION(IXRT,JXRT) :: IMPERVFRAC
 
-        integer         :: I,J, iret, jj, channel_option, UDMP_OPT
+        integer         :: I,J, iret, jj, channel_option, UDMP_OPT, imperv_adj
         CHARACTER(len=256)        :: var_name
         CHARACTER(len=*  )       :: route_topo_f
         CHARACTER(len=*  )       :: route_chan_f
@@ -5545,7 +5667,7 @@ end subroutine mpp_output_chrt
 
      IF(channel_option .ne. 3 .and. UDMP_OPT .ne. 1) then  !get maxnodes and links from grid
         var_name = "LINKID"
-        call nreadRT2d_int(var_name,CH_LNKRT,ixrt,jxrt,&
+        call nreadRT2d_int8(var_name,CH_LNKRT,ixrt,jxrt,&
                trim(geo_finegrid_flnm), fatalErr=.true.)
      endif
 
@@ -5591,6 +5713,16 @@ end subroutine mpp_output_chrt
                      trim(geo_finegrid_flnm))
         where (OVROUGHRTFAC <= 0.) OVROUGHRTFAC = 1.0 ! reset grid to = 1.0 if non-valid value exists
 
+!Read in new optional impervious layer
+        var_name = "IMPERVFRAC"
+        IMPERVFRAC = -9999.9
+        if (imperv_adj > 0) then
+          call nreadRT2d_real(var_name,IMPERVFRAC,ixrt,jxrt,&
+                     trim(geo_finegrid_flnm), fatalErr=.true.)
+          where (IMPERVFRAC < 0.) IMPERVFRAC = 0.0  ! reset grid to = 0.0 if non-valid value exists
+        else
+          IMPERVFRAC = 0.0
+        endif
 
 #ifdef HYDRO_D
         write(6,*) "finish READ_ROUTING_seq"
@@ -6528,7 +6660,7 @@ end if  ! end if(nlst_rt(did)%SUBRTSWCRT  .eq. 1 .or. &
                        basnsInd, inV,vName )
       implicit none
       integer :: ncid,numbasns,gnumbasns
-      integer, dimension(:) :: basnsInd
+      integer(kind=int64), dimension(:) :: basnsInd
       real, dimension(:) :: inV
       character(len=*) :: vName
       integer i, j, k
@@ -6554,7 +6686,7 @@ end if  ! end if(nlst_rt(did)%SUBRTSWCRT  .eq. 1 .or. &
                        gnumbasns,basnsInd, vName)
       implicit none
       integer :: ncid,numbasns,gnumbasns
-      integer, dimension(:) :: basnsInd
+      integer(kind=int64), dimension(:) :: basnsInd
       real, dimension(:) :: outV
       character(len=*) :: vName
       integer i, j,k
@@ -7311,11 +7443,12 @@ integer                                      :: CHANRTSWCRT, NLINKS, NLAKES
 real, intent(IN), dimension(IXRT,JXRT)       :: fgDEM
 integer, dimension(IXRT,JXRT)                :: DIRECTION
 integer, dimension(IXRT,JXRT)                :: GSTRMFRXSTPTS
-integer, intent(IN), dimension(IXRT,JXRT)    :: CH_NETRT, CH_LNKRT
+integer, intent(IN), dimension(IXRT,JXRT)    :: CH_NETRT
+integer(kind=int64), intent(IN), dimension(IXRT,JXRT)    :: CH_LNKRT
 integer, intent(INOUT), dimension(IXRT,JXRT) :: LAKE_MSKRT
 integer,                dimension(IXRT,JXRT) :: GORDER  !-- gridded stream orderk
 #ifdef MPP_LAND
-integer,                dimension(IXRT,JXRT) :: Link_Location !-- gridded stream orderk
+integer(kind=int64),    dimension(IXRT,JXRT) :: Link_Location !-- gridded stream orderk
 integer :: LNLINKSL
 #endif
 integer                                      :: I,J,K,channel_option
@@ -7325,21 +7458,22 @@ character(len=28)                            :: dir
 
 !----DJG,DNY New variables for channel and lake routing
 character(len=155)	 :: header
-integer, intent(INOUT),  dimension(NLINKS)   :: FROM_NODE
+integer(kind=int64), intent(INOUT),  dimension(NLINKS)   :: FROM_NODE
 real, intent(INOUT),  dimension(NLINKS)      :: ZELEV
 real, intent(INOUT),  dimension(NLINKS)      :: CHLAT,CHLON
 
+integer(kind=int64), intent(INOUT),  dimension(NLINKS)   :: TO_NODE
 integer, intent(INOUT),  dimension(NLINKS)   :: TYPEL
-integer, intent(INOUT),  dimension(NLINKS)   :: TO_NODE,ORDER
+integer, intent(INOUT),  dimension(NLINKS)   :: ORDER
 integer, intent(INOUT),  dimension(NLINKS)   :: STRMFRXSTPTS
 
 integer, intent(INOUT)                       :: MAXORDER
 real, intent(INOUT),  dimension(NLINKS)      :: CHANLEN   !channel length
 real, intent(INOUT),  dimension(NLINKS)      :: MannN, So !mannings N
-integer, intent(INOUT),  dimension(NLINKS)   :: LAKENODE !,LINKID   ! identifies which nodes pour into which lakes
+integer(kind=int64), intent(INOUT),  dimension(NLINKS)   :: LAKENODE !,LINKID   ! identifies which nodes pour into which lakes
 real, intent(IN)                             :: dist(ixrt,jxrt,9)
 
-integer, intent(IN), dimension(IXRT,JXRT)    :: CH_NETLNK
+integer(kind=int64), intent(IN), dimension(IXRT,JXRT)    :: CH_NETLNK
 real,  dimension(IXRT,JXRT)                  :: ChSSlpG,BwG,TwG,MannNG  !channel properties
 real,  dimension(IXRT,JXRT)                  :: Tw_CCG,n_CCG            !channel properties of compound
 real,  dimension(IXRT,JXRT)                  :: ChannKG                 !Channel Infiltration
@@ -7348,7 +7482,7 @@ real,  dimension(IXRT,JXRT)                  :: chanDepth, elrt
 
 !-- store the location x,y location of the channel element
 integer, intent(INOUT), dimension(NLINKS)   :: CHANXI, CHANYJ
-integer , dimension(:) ::  LAKEIDM
+integer(kind=int64), dimension(:) ::  LAKEIDM
 
 !--reservoir/lake attributes
 logical, intent(IN)			            :: reservoir_type_specified
@@ -7372,7 +7506,8 @@ character(len=*  )                           :: geo_finegrid_flnm, route_lake_f
 character(len=256)                           :: var_name
 
 integer                                      :: tmp, cnt, ncid, iret, jj,ct
-integer 			             :: IOstatus, OUTLAKEID
+integer 			             :: IOstatus
+integer(kind=int64)              :: OUTLAKEID
 
 real                                         :: gc,n
 integer :: did
@@ -7548,7 +7683,7 @@ do j = 1,JXRT  !rows
                MannN(cnt) = MannNG(i,j)
                ChSSlp(cnt) = ChSSlpG(i,j)
                Bw(cnt) = BwG(i,j)
-               ChannK(cnt) = ChannKG(i,j) 
+               ChannK(cnt) = ChannKG(i,j)
                Tw(cnt) = TwG(i,j)
                Tw_CC(cnt) = Tw_CCG(i,j)
                n_CC(cnt) = n_CCG(i,j)
@@ -7821,7 +7956,7 @@ do j = 1,JXRT
             MannN(cnt) = MannNG(i,j)
             ChSSlp(cnt) = ChSSlpG(i,j)
             Bw(cnt) = BwG(i,j)
-            ChannK(cnt) = ChannKG(i,j) 
+            ChannK(cnt) = ChannKG(i,j)
             Tw(cnt) = TwG(i,j)
             Tw_CC(cnt) = Tw_CCG(i,j)
             n_CC(cnt) = n_CCG(i,j)
@@ -8187,7 +8322,7 @@ print*, "my_id=",my_id, "cnt = ", cnt
 
 #ifdef MPP_LAND
 Link_location = CH_NETLNK
-call MPP_CHANNEL_COM_INT(Link_location,ixrt,jxrt,TYPEL,NLINKS,99)
+call MPP_CHANNEL_COM_INT(Link_location,ixrt,jxrt,int(TYPEL, int64),NLINKS,99)
 call MPP_CHANNEL_COM_INT(Link_location,ixrt,jxrt,LAKENODE,NLINKS,99)
 #endif
 
@@ -8211,7 +8346,7 @@ subroutine read_routelink(&
      CHLON,        NLINKSL,      LINKID,   GNLINKSL,   &
      NLINKS,       gages,        gageMiss               )
 
-integer, intent(INOUT),  dimension(NLINKS) :: TO_NODE, TYPEL, ORDER
+integer, intent(INOUT),  dimension(NLINKS) :: TYPEL, ORDER
 integer, intent(INOUT)                     :: MAXORDER
 integer                                    :: NLAKES
 real,    intent(INOUT),  dimension(NLINKS) :: MUSK, MUSX
@@ -8220,7 +8355,6 @@ real,    intent(INOUT),  dimension(NLINKS) :: CHANLEN, MannN, So
 real,    intent(INOUT),  dimension(:)      :: ChSSlp, Bw, Tw !added Top Width LKR/DY
 real,    intent(INOUT),  dimension(:)      :: Tw_CC, n_CC !compound chnannel params
 real,    intent(INOUT),  dimension(:)      :: ChannK !added ChanLoss
-integer, intent(INOUT),  dimension(:)      :: LAKEIDA !lake COMid 4all link on full nlinks database
 real,    intent(INOUT),  dimension(:)      :: HRZAREA
 real,    intent(INOUT),  dimension(:)      :: LAKEMAXH, WEIRH, WEIRC, WEIRL, DAML
 real,    intent(INOUT),  dimension(:)      :: ORIFICEC, ORIFICEA, ORIFICEE
@@ -8228,19 +8362,20 @@ logical, intent(IN)                        :: reservoir_type_specified
 integer, intent(INOUT),  dimension(:)      :: reservoir_type
 character(len=*), intent(in)               :: reservoir_parameter_file
 real,    intent(INOUT),  dimension(:)      :: LATLAKE, LONLAKE, ELEVLAKE
-integer, intent(INOUT), dimension(:)       :: LAKEIDM !lake id in LAKEPARM table (.nc or .tbl)
+integer(kind=int64), intent(INOUT), dimension(:)  :: LAKEIDM !lake id in LAKEPARM table (.nc or .tbl)
+integer(kind=int64), intent(INOUT), dimension(:)  :: LAKEIDA !lake COMid 4all link on full nlinks database
 integer, intent(INOUT),  dimension(:)      :: LAKEIDX !seq index of lakes(1:Nlakes) mapped to COMID
 character(len=256)                         :: route_link_f, route_lake_f
 real,    intent(INOUT),  dimension(NLINKS) :: ZELEV, CHLAT, CHLON
 integer                                    :: NLINKS, NLINKSL
-integer, intent(INOUT),  dimension(NLINKS) :: LINKID   !  which nodes pour into which lakes
+integer(kind=int64), intent(INOUT),  dimension(NLINKS) :: TO_NODE, LINKID   !  which nodes pour into which lakes
 integer                                    :: GNLINKSL
 character(len=15), intent(inout), dimension(nlinks) :: gages  !! need to respect the default values
-character(len=15), intent(in)                :: gageMiss
+character(len=15), intent(in)              :: gageMiss
 integer :: did
 
 !! local variables
-integer, dimension(NLAKES)                   :: LAKELINKID !temporarily store the outlet index for each modeled lake
+integer(kind=int64), dimension(NLAKES)         :: LAKELINKID !temporarily store the outlet index for each modeled lake
 
 did = 1
 LAKELINKID = 0
@@ -8267,7 +8402,7 @@ if (NLAKES > 0) then
    !         call mpp_land_bcast_int(NLINKSL,LAKEIDA)
    !         call mpp_land_bcast_int(NLINKSL,LAKEIDX)
    call mpp_land_bcast_real(NLAKES,HRZAREA)
-   call mpp_land_bcast_int(NLAKES,LAKEIDM)
+   call mpp_land_bcast_int8(NLAKES,LAKEIDM)
    call mpp_land_bcast_real(NLAKES,LAKEMAXH)
    call mpp_land_bcast_real(NLAKES,WEIRH  )
    call mpp_land_bcast_real(NLAKES,WEIRC  )
@@ -8299,8 +8434,9 @@ end subroutine read_routelink
         character(len=*) :: route_link_f,route_lake_f
         integer  :: GNLINKSL, NLINKSL, tmp_from_node,NLAKES
 
-        INTEGER, INTENT(INOUT)                   :: MAXORDER
-        INTEGER, intent(out), dimension(:) :: LAKEIDA, LINKID, TO_NODE, TYPEL, ORDER
+        INTEGER, INTENT(INOUT)                     :: MAXORDER
+        integer(kind=int64), intent(out), dimension(:) :: LAKEIDA, LINKID, TO_NODE
+        INTEGER, intent(out), dimension(:)         :: TYPEL, ORDER
 
         real,dimension(:,:)  :: QLINK
         real, intent(out), dimension(:) ::  CHLON, CHLAT, ZELEV, MUSK, MUSX, CHANLEN
@@ -8311,14 +8447,16 @@ end subroutine read_routelink
         character(len=15), intent(in) :: gageMiss
 
 !NLAKES
-        INTEGER, intent(out), dimension(:)  ::  LAKEIDM, reservoir_type
+        integer(kind=int64), intent(out), dimension(:)  ::  LAKEIDM
+        integer, intent(out), dimension(:)  ::  reservoir_type
         logical, intent(in)		            ::  reservoir_type_specified
         character(len=*), intent(in)        ::  reservoir_parameter_file
         REAL, intent(out), dimension(:) :: HRZAREA,LAKEMAXH, WEIRC, WEIRL, DAML, ORIFICEC, WEIRH, &
                    ORIFICEA, ORIFICEE, ELEVLAKE
 !end NLAKES
 
-        INTEGER, dimension(GNLINKSL) ::  tmpLAKEIDA, tmpLINKID,  tmpTO_NODE, tmpTYPEL, tmpORDER
+        INTEGER(kind=int64), dimension(GNLINKSL) ::  tmpLAKEIDA, tmpLINKID,  tmpTO_NODE
+        INTEGER, dimension(GNLINKSL) ::  tmpTYPEL, tmpORDER
         character(len=15), dimension(gnlinksl) :: tmpGages
         CHARACTER(len=155)	 :: header
         integer :: i
@@ -8332,7 +8470,7 @@ end subroutine read_routelink
         real, allocatable, dimension(:) ::  tmpCHLON, tmpCHLAT, tmpZELEV, tmpMUSK, tmpMUSX, tmpCHANLEN
         real, allocatable, dimension(:) ::  tmpMannN, tmpSo, tmpChSSlp, tmpBw, tmpTw, tmpTw_CC, tmpn_CC
         real, allocatable, dimension(:) ::  tmpChannK
-#endif 
+#endif
 
         !! is RouteLink file netcdf (*.nc) or csv (*.csv)
         route_link_f_r = adjustr(route_link_f)
@@ -8459,7 +8597,7 @@ end subroutine read_routelink
            call mpp_land_bcast_real(NLAKES, ORIFICEC)
            call mpp_land_bcast_real(NLAKES, ORIFICEA)
            call mpp_land_bcast_real(NLAKES, ORIFICEE)
-           call mpp_land_bcast_int(NLAKES, LAKEIDM)
+           call mpp_land_bcast_int8(NLAKES, LAKEIDM)
            call mpp_land_bcast_real(NLAKES, ELEVLAKE)
            call mpp_land_bcast_int(NLAKES, reservoir_type)
         endif
@@ -8495,7 +8633,7 @@ end subroutine read_routelink
                  CHLAT,      ZELEV,     TYPEL,    ORDER,    &
                  QLINK(:,1), MUSK,      MUSX,     CHANLEN,  &
                  MannN,      So,        ChSSlp,   Bw,       &
-                 Tw,         Tw_CC,     n_CC,     ChannK, gages,    & 
+                 Tw,         Tw_CC,     n_CC,     ChannK, gages,    &
                  LAKEIDA                                     )
 
         else
@@ -8577,18 +8715,19 @@ integer                                      :: I,J,channel_option
 character(len=28)                            :: dir
 
 character(len=155)	 :: header
-integer, intent(INOUT),  dimension(NLINKS)   :: FROM_NODE
+integer(kind=int64), intent(INOUT),  dimension(NLINKS)   :: FROM_NODE
 real, intent(INOUT),  dimension(NLINKS)      :: ZELEV
 real, intent(INOUT),  dimension(NLINKS)      :: CHLAT,CHLON
 
+integer(kind=int64), intent(INOUT),  dimension(NLINKS)   :: TO_NODE
 integer, intent(INOUT),  dimension(NLINKS)   :: TYPEL
-integer, intent(INOUT),  dimension(NLINKS)   :: TO_NODE,ORDER
+integer, intent(INOUT),  dimension(NLINKS)   :: ORDER
 integer, intent(INOUT),  dimension(NLINKS)   :: STRMFRXSTPTS
 
 integer, intent(INOUT)                       :: MAXORDER
 real, intent(INOUT),  dimension(NLINKS)      :: CHANLEN   !channel length
 real, intent(INOUT),  dimension(NLINKS)      :: MannN, So !mannings N
-integer, intent(INOUT),  dimension(NLINKS)   :: LAKENODE  ! identifies which nodes pour into which lakes
+integer(kind=int64), intent(INOUT),  dimension(NLINKS)   :: LAKENODE  ! identifies which nodes pour into which lakes
 real, intent(IN)                             :: dist(ixrt,jxrt,9)
 integer, intent(INOUT),  dimension(NLINKS)   :: map_l2g
 
@@ -8607,7 +8746,7 @@ real, intent(INOUT),  dimension(NLAKES)      :: ORIFICEE
 integer, intent(INOUT), dimension(NLAKES)    :: reservoir_type
 character(len=*), intent(in)                 :: reservoir_parameter_file
 real, intent(INOUT),  dimension(NLAKES)      :: LATLAKE,LONLAKE,ELEVLAKE
-real, intent(INOUT), dimension(NLINKS)       :: ChSSlp, Bw, Tw 
+real, intent(INOUT), dimension(NLINKS)       :: ChSSlp, Bw, Tw
 real, intent(INOUT), dimension(NLINKS)       :: Tw_CC, n_CC, ChannK
 
 character(len=*  )                           :: geo_finegrid_flnm, route_lake_f
@@ -8616,14 +8755,17 @@ character(len=256)                           :: var_name
 integer                                      :: tmp, cnt, ncid
 real                                         :: gc,n
 
-integer, intent(IN), dimension(IXRT,JXRT)    :: CH_NETLNK,GCH_NETLNK
+integer(kind=int64), intent(IN), dimension(IXRT,JXRT)    :: CH_NETLNK,GCH_NETLNK
 real, intent(IN), dimension(IXRT,JXRT)       :: ELRT
-integer, intent(IN), dimension(IXRT,JXRT) :: CH_NETRT, CH_LNKRT
-integer, intent(OUT), dimension(IXRT,JXRT) :: LAKE_MSKRT, link_location
+integer, intent(IN), dimension(IXRT,JXRT)    :: CH_NETRT
+integer(kind=int64), intent(IN), dimension(IXRT,JXRT) :: CH_LNKRT
+integer, intent(OUT), dimension(IXRT,JXRT) :: LAKE_MSKRT
+integer(kind=int64), intent(OUT), dimension(IXRT,JXRT) :: link_location
 real, intent(OUT), dimension(IXRT,JXRT)    :: latval,lonval
 integer :: k
 integer, dimension(nlinks)            :: node_table, nlinks_index
-integer, dimension(nlakes)            :: lake_index, LAKEIDM
+integer, dimension(nlakes)            :: lake_index
+integer(kind=int64), dimension(nlakes)    :: LAKEIDM
 integer :: yw_mpp_nlinks , l, mpp_nlinks
 
 
@@ -8838,12 +8980,12 @@ subroutine read_route_link_netcdf( route_link_file,                         &
 
 implicit none
 character(len=*),        intent(in)  :: route_link_file
-integer, dimension(:),   intent(out) :: LAKEIDA, LINKID, TO_NODE
+integer(kind=int64), dimension(:),   intent(out) :: LAKEIDA, LINKID, TO_NODE
 real,    dimension(:),   intent(out) :: CHLON, CHLAT, ZELEV
 integer, dimension(:),   intent(out) :: TYPEL, ORDER
 real,    dimension(:),   intent(out) :: QLINK
 real,    dimension(:),   intent(out) :: MUSK, MUSX, CHANLEN
-real,    dimension(:),   intent(out) :: MannN, So, ChSSlp, Bw, Tw 
+real,    dimension(:),   intent(out) :: MannN, So, ChSSlp, Bw, Tw
 real,    dimension(:),   intent(out) :: Tw_CC, n_CC, ChannK
 
 character(len=15), dimension(:), intent(inout) :: gages
@@ -8863,9 +9005,9 @@ if (iRet /= nf90_noErr) then
 endif
 
 
-call get_1d_netcdf_int(ncid,  'link',     LINKID,    'read_route_link_netcdf', .TRUE.)
-call get_1d_netcdf_int(ncid,  'NHDWaterbodyComID',  LAKEIDA, 'read_route_link_netcdf', .FALSE.)
-call get_1d_netcdf_int(ncid,  'to',       TO_NODE,   'read_route_link_netcdf', .TRUE.)
+call get_1d_netcdf_int64(ncid,  'link',     LINKID,    'read_route_link_netcdf', .TRUE.)
+call get_1d_netcdf_int64(ncid,  'NHDWaterbodyComID',  LAKEIDA, 'read_route_link_netcdf', .FALSE.)
+call get_1d_netcdf_int64(ncid,  'to',       TO_NODE,   'read_route_link_netcdf', .TRUE.)
 call get_1d_netcdf_real(ncid, 'lon',      CHLON,     'read_route_link_netcdf', .TRUE.)
 call get_1d_netcdf_real(ncid, 'lat',      CHLAT,     'read_route_link_netcdf', .TRUE.)
 call get_1d_netcdf_real(ncid, 'alt',      ZELEV,     'read_route_link_netcdf', .TRUE.)
@@ -8877,8 +9019,8 @@ call get_1d_netcdf_real(ncid, 'MusX',     MUSX,      'read_route_link_netcdf', .
 call get_1d_netcdf_real(ncid, 'Length',   CHANLEN,   'read_route_link_netcdf', .TRUE.)
 call get_1d_netcdf_real(ncid, 'n',        MannN,     'read_route_link_netcdf', .TRUE.)
 call get_1d_netcdf_real(ncid, 'So',       So,        'read_route_link_netcdf', .TRUE.)
-!! impose a minimum as this sometimes fails in the file. LKR changed to 10^-4 on 2/2018.
-where(So .lt. 0.0001) So=0.00001
+!! impose a minimum as this sometimes fails in the file. 
+where(So .lt. 0.00001) So=0.00001
 call get_1d_netcdf_real(ncid, 'ChSlp',    ChSSlp,    'read_route_link_netcdf', .TRUE.)
 call get_1d_netcdf_real(ncid, 'BtmWdth',  Bw,        'read_route_link_netcdf', .TRUE.)
 !! Loads channel infiltration, by default is zero, my need to add namelist option in future
@@ -8944,15 +9086,15 @@ subroutine read_route_lake_netcdf(route_lake_file,                         &
                                    LAKEIDM, lakelat, lakelon, ELEVLAKE, NLAKES)
 
     implicit none
-    character(len=*),        intent(in)  :: route_lake_file
-    integer,                 intent(in)  :: NLAKES
-    logical,                 intent(in)  :: reservoir_type_specified
-    character(len=*),        intent(in)  :: reservoir_parameter_file
-    integer, dimension(:),   intent(out) :: LAKEIDM
-    real,    dimension(:),   intent(out) :: HRZAREA,  LAKEMAXH, WEIRC,    WEIRL, WEIRH, DAML
-    real,    dimension(:),   intent(out) :: ORIFICEC, ORIFICEA, ORIFICEE, lakelat, lakelon
-    real,    dimension(:),   intent(out) :: ELEVLAKE
-    integer, dimension(:),   intent(out) :: reservoir_type
+    character(len=*),              intent(in)  :: route_lake_file
+    integer,                       intent(in)  :: NLAKES
+    logical,                       intent(in)  :: reservoir_type_specified
+    character(len=*),              intent(in)  :: reservoir_parameter_file
+    integer(kind=int64), dimension(:), intent(out) :: LAKEIDM
+    real,    dimension(:),         intent(out) :: HRZAREA,  LAKEMAXH, WEIRC,    WEIRL, WEIRH, DAML
+    real,    dimension(:),         intent(out) :: ORIFICEC, ORIFICEA, ORIFICEE, lakelat, lakelon
+    real,    dimension(:),         intent(out) :: ELEVLAKE
+    integer, dimension(:),         intent(out) :: reservoir_type
 
     integer :: iRet, ncid, ii, varid
     logical :: fatal_if_error
@@ -8968,7 +9110,7 @@ subroutine read_route_lake_netcdf(route_lake_file,                         &
        if (fatal_IF_ERROR) call hydro_stop("read_route_lake_netcdf: Problem opening file.")
     endif
 
-    call get_1d_netcdf_int(ncid,  'lake_id',     LAKEIDM,'read_route_lake_netcdf', .TRUE.)
+    call get_1d_netcdf_int64(ncid,  'lake_id',   LAKEIDM,'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'LkArea',   HRZAREA,   'read_route_lake_netcdf', .TRUE.)
     !rename the LAKEPARM input vars for Elev instead of Ht, 08/23/17 LKR/DY
     call get_1d_netcdf_real(ncid, 'LkMxE',    LAKEMAXH,  'read_route_lake_netcdf', .TRUE.)
@@ -8976,14 +9118,14 @@ subroutine read_route_lake_netcdf(route_lake_file,                         &
     call get_1d_netcdf_real(ncid, 'WeirE',    WEIRH,     'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'WeirC',    WEIRC,     'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'WeirL',    WEIRL,     'read_route_lake_netcdf', .TRUE.)
-    call get_1d_netcdf_real(ncid, 'Dam_Length', DAML,      'read_route_lake_netcdf', .TRUE.)
+    call get_1d_netcdf_real(ncid, 'Dam_Length', DAML,    'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'OrificeC', ORIFICEC,  'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'OrificeA', ORIFICEA,  'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'OrificeE', ORIFICEE,  'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'lat', lakelat,        'read_route_lake_netcdf', .TRUE.)
     call get_1d_netcdf_real(ncid, 'lon', lakelon,        'read_route_lake_netcdf', .TRUE.)
     !remove the alt var. and add initial fractional depth var. LKR/DY
-    call get_1d_netcdf_real(ncid, 'ifd', ELEVLAKE,         'read_route_lake_netcdf', .FALSE.)
+    call get_1d_netcdf_real(ncid, 'ifd', ELEVLAKE,       'read_route_lake_netcdf', .FALSE.)
 
     iRet = nf90_close(ncId)
     if (iRet /= nf90_noErr) then
@@ -9049,6 +9191,26 @@ if (iRet /= nf90_NoErr) then
 end if
 end subroutine get_1d_netcdf_int
 
+    subroutine get_1d_netcdf_int64(ncid, varName, var, callingRoutine, fatal_if_error)
+        integer,                       intent(in)  :: ncid !! the file identifier
+        character(len=*),              intent(in)  :: varName
+        integer(kind=int64), dimension(:), intent(out) :: var
+        character(len=*),              intent(in)  :: callingRoutine
+        logical,                       intent(in)  :: fatal_if_error
+        integer :: varid, iret
+        iRet = nf90_inq_varid(ncid, varName, varid)
+        if (iret /= nf90_noErr) then
+            if (fatal_IF_ERROR) then
+                print*, trim(callingRoutine) // ": get_1d_netcdf_real: variable: " // trim(varName)
+                call hydro_stop("get_1d_netcdf")
+            end if
+        end if
+        iRet = nf90_get_var(ncid, varid, var)
+        if (iRet /= nf90_NoErr) then
+            print*, trim(callingRoutine) // ": get_1d_netcdf_int: values: " // trim(varName)
+            if (fatal_IF_ERROR) call hydro_stop("get_1d_netcdf_int")
+        end if
+    end subroutine get_1d_netcdf_int64
 
 subroutine get_1d_netcdf_real(ncid, varName, var, callingRoutine, fatal_if_error)
 integer,            intent(in)  :: ncid !! the file identifier
@@ -9167,19 +9329,20 @@ end function get_netcdf_dim
 subroutine readBucket_nhd(infile, numbasns, gw_buck_coeff, gw_buck_exp, &
                 gw_buck_loss, z_max, z_init, LINKID, nhdBuckMask)
     implicit none
-    integer :: numbasns
-    integer, dimension(numbasns) :: LINKID
+    integer, intent(in) :: numbasns
+    integer(kind=int64), dimension(numbasns) :: LINKID
     real, dimension(numbasns) :: gw_buck_coeff, gw_buck_exp, gw_buck_loss
     real, dimension(numbasns) :: z_max, z_init
     integer, dimension(numbasns) :: nhdBuckMask
-    character(len=*) :: infile
+    character(len=*), intent(in) :: infile
 !   define temp array
-    integer :: i,j,k, gnid, ncid, varid, ierr, dimid, iret
-    integer, allocatable, dimension(:) :: tmpLinkid
+    integer, volatile :: i,j,k, gnid, ncid, varid, ierr, dimid, iret
+    integer(kind=int64), allocatable, dimension(:) :: tmpLinkid
     real, allocatable, dimension(:) :: tmpCoeff, tmpExp, tmpLoss
     real, allocatable, dimension(:) :: tmpz_max, tmpz_init
 
 !   get gnid
+    gnid = 0
 #ifdef MPP_LAND
     if(my_id .eq. io_id ) then
 #endif
@@ -9193,7 +9356,7 @@ subroutine readBucket_nhd(infile, numbasns, gw_buck_coeff, gw_buck_exp, &
                !print*, "nf90_inq_dimid:  BasinDim"
                call hydro_stop("Failed read GBUCKETPARM - nf90_inq_dimid:  BasinDim")
        endif
-       iret = nf90_inquire_dimension(ncid, dimid, len = gnid)
+       iret = nf90_inquire_dimension(ncid, dimid, len=gnid)
     endif
     call mpp_land_bcast_int1(gnid)
 #endif
@@ -9249,7 +9412,7 @@ subroutine readBucket_nhd(infile, numbasns, gw_buck_coeff, gw_buck_exp, &
                print * , "could not find ComID from ", infile
                call hydro_stop("Failed to read BUCKETPARM")
           endif
-          iret = nf90_get_var(ncid, varid, tmpLinkid)
+          iret = nf90_get_var(ncid, varid, tmpLinkID)
 #ifdef MPP_LAND
     endif
        if(gnid .gt. 0) then
@@ -9260,7 +9423,7 @@ subroutine readBucket_nhd(infile, numbasns, gw_buck_coeff, gw_buck_exp, &
           endif
           call mpp_land_bcast_real_1d(tmpz_max)
           call mpp_land_bcast_real_1d(tmpz_init)
-          call mpp_land_bcast_int(gnid ,tmpLinkid)
+          call mpp_land_bcast_int8(gnid ,tmpLinkid)
        endif
 #endif
 
@@ -9275,7 +9438,7 @@ subroutine readBucket_nhd(infile, numbasns, gw_buck_coeff, gw_buck_exp, &
        !                z_max(k) = tmpz_max(i)
        !                z_init(k) = tmpz_init(i)
        !                nhdBuckMask(k) = 1
-       !                goto 301 
+       !                goto 301
        !             endif
        !         end do
        ! 301     continue
@@ -9283,9 +9446,9 @@ subroutine readBucket_nhd(infile, numbasns, gw_buck_coeff, gw_buck_exp, &
 
        block
          type(hash_t) :: hash_table
-         integer :: val,it
+         integer(kind=int64) :: val,it
          logical :: found
-         
+
          call hash_table%set_all_idx(LINKID,numbasns)
          do it=1, gnid
             call hash_table%get(tmpLinkid(it), val, found)
@@ -9353,7 +9516,8 @@ end subroutine readBucket_nhd
      real, dimension(:),               intent(in) :: chlon,chlat
      real, dimension(:),                  intent(in) :: hlink,zelev
 
-     integer, dimension(:),               intent(in) :: ORDER, linkid
+     integer, dimension(:),               intent(in) :: ORDER
+     integer(kind=int64), dimension(:),       intent(in) :: linkid
 
      real,                                     intent(in) :: dtrt_ch
      real, dimension(:,:),                intent(in) :: qlink
@@ -9376,7 +9540,8 @@ end subroutine readBucket_nhd
 #ifdef WRF_HYDRO_NUDGING
       real, allocatable,dimension(:) :: g_nudge
 #endif
-      integer, allocatable,dimension(:) :: g_order, g_linkid
+      integer, allocatable,dimension(:) :: g_order
+      integer(kind=int64), allocatable, dimension(:) :: g_linkid
       real,allocatable,dimension(:,:) :: g_qlink
       integer  :: gsize
       real*8, allocatable, dimension(:) :: g_accSfcLatRunoff, g_accBucket
@@ -9486,7 +9651,7 @@ end subroutine readBucket_nhd
         call write_chanel_real(qlink(:,1),map_l2g,gnlinks,nlinks,g_qlink(:,1))
         call write_chanel_real(qlink(:,2),map_l2g,gnlinks,nlinks,g_qlink(:,2))
         call write_chanel_int(order,map_l2g,gnlinks,nlinks,g_order)
-        call write_chanel_int(linkid,map_l2g,gnlinks,nlinks,g_linkid)
+        call write_chanel_int8(linkid,map_l2g,gnlinks,nlinks,g_linkid)
         call write_chanel_real(chlon,map_l2g,gnlinks,nlinks,g_chlon)
         call write_chanel_real(chlat,map_l2g,gnlinks,nlinks,g_chlat)
         call write_chanel_real(zelev,map_l2g,gnlinks,nlinks,g_zelev)
@@ -9579,7 +9744,7 @@ end subroutine mpp_output_chrt2
 
 
 
-     integer, allocatable, DIMENSION(:)         :: linkid
+     integer(kind=int64), allocatable, dimension(:) :: linkid
 
      integer, allocatable, DIMENSION(:)         :: rec_num_of_station
      integer, allocatable, DIMENSION(:)         :: rec_num_of_stationO
@@ -9937,7 +10102,7 @@ end subroutine output_chrt2
 
 #ifdef MPP_LAND
        real, allocatable, dimension(:) :: g_qin_gwsubbas, g_qout_gwsubbas, g_z_gwsubbas
-       integer, allocatable, dimension(:) :: g_basnsInd
+       integer(kind=int64), allocatable, dimension(:) :: g_basnsInd
        if(my_id .eq. io_id) then
           if(nlst(did)%GWBASESWCRT.EQ.1 .OR. nlst(did)%GWBASESWCRT.GE.4) then
                allocate(g_qin_gwsubbas(rt_domain(did)%gnumbasns))
@@ -10037,7 +10202,7 @@ end subroutine output_chrt2
      integer,                                  intent(in) :: split_output_count
      integer,                                  intent(in) :: nbasns
      real, dimension(:),                  intent(in) :: gw_in_var, gw_out_var, gw_z_var
-     integer, dimension(:),               intent(in) :: gw_id_var
+     integer(kind=int64), dimension(:),               intent(in) :: gw_id_var
 
      character(len=*),                         intent(in) :: startdate
      character(len=*),                         intent(in) :: date
@@ -10206,9 +10371,8 @@ end subroutine output_chrt2
     subroutine nhdLakeMap(NLAKES, NLINKSL, TYPEL, LAKELINKID, LAKEIDX, gTO_NODE,LINKID, LAKEIDM, LAKEIDA)
         !--- get the lake configuration here.
         implicit none
-        integer, dimension(:),   intent(inout) :: TYPEL, LAKELINKID, LAKEIDX
-        integer, dimension(:),   intent(inout) :: gTO_NODE
-        integer, dimension(:),   intent(inout) :: LINKID, LAKEIDM, LAKEIDA
+        integer, dimension(:),         intent(inout) :: TYPEL, LAKEIDX
+        integer(kind=int64), dimension(:), intent(inout) :: LINKID, LAKEIDA, LAKELINKID, LAKEIDM, gTO_NODE
         integer, intent(in) :: NLAKES, NLINKSL
         integer, dimension(NLINKSL) :: OUTLAKEID
         integer :: i,j,k, kk
@@ -10295,21 +10459,24 @@ end subroutine output_chrt2
     subroutine nhdLakeMap_mpp(NLAKES, NLINKSL, TYPEL, LAKELINKID, LAKEIDX, TO_NODE,LINKID, LAKEIDM, LAKEIDA,GNLINKSL)
         !--- get the lake configuration here.
         implicit none
-        integer, dimension(:),   intent(out) :: TYPEL, LAKELINKID, LAKEIDX
-        integer, dimension(:),   intent(inout) :: TO_NODE
-        integer, dimension(:),   intent(in) :: LINKID, LAKEIDA
-        integer, dimension(:),   intent(inout) :: LAKEIDM
+        integer, dimension(:),           intent(out)   :: TYPEL
+        integer, dimension(:),   intent(out)   :: LAKEIDX
+        integer(kind=int64), dimension(:),   intent(inout) :: TO_NODE
+        integer(kind=int64), dimension(:),   intent(out)   :: LAKELINKID
+        integer(kind=int64), dimension(:),   intent(in)    :: LINKID, LAKEIDA
+        integer(kind=int64), dimension(:),   intent(inout) :: LAKEIDM
         integer, intent(in) :: NLAKES, NLINKSL ,GNLINKSL
 !yw        integer, dimension(NLINKSL) :: OUTLAKEID
-        integer, allocatable, dimension(:) :: OUTLAKEID
+        integer(kind=int64), allocatable, dimension(:) :: OUTLAKEID
         integer :: i,size2 ,j,k, kk, num, maxNum, m, mm, tmpSize
-        integer, allocatable, dimension(:) :: gLINKID, tmpTYPEL, tmpLINKID, ind,  &
-                    tmplakeida, tmpoutlakeid, tmpTO_NODE, gLAKEIDA, gLAKEIDX
-        integer, allocatable, dimension(:,:) :: gtonodeout
+        integer, allocatable, dimension(:) :: tmpTYPEL, ind, gLAKEIDX
+        integer(kind=int64), allocatable, dimension(:) :: gLINKID, tmpLINKID, tmplakeida, tmpoutlakeid, gLAKEIDA
+        integer(kind=int64), allocatable, dimension(:,:) :: gtonodeout
 
-        integer,allocatable, dimension(:) ::  gto, tmpLAKELINKID, gTYPEL, gOUTLAKEID
+        integer, allocatable, dimension(:) ::  gTYPEL
+        integer(kind=int64), allocatable, dimension(:) ::  tmpLAKELINKID, gOUTLAKEID, tmpTO_NODE, gto
 
-      integer tmpBuf(GNLINKSL)
+      integer(kind=int64) tmpBuf(GNLINKSL)
 
       tmpSize = size(TO_NODE,1)
       allocate(OUTLAKEID(tmpSize))
@@ -10349,14 +10516,14 @@ end subroutine output_chrt2
 
       block
         type(hash_t) :: hash_table
-        integer :: val,it
-        integer, allocatable :: num_a(:)
+        integer(kind=int64) :: val,it
+        integer(kind=int64), allocatable :: num_a(:)
         logical :: found
-        
+
         allocate(num_a(NLINKSL))
         num_a = 0
         kk = 0
-        
+
         call hash_table%set_all_idx(linkid, NLINKSL)
         do it=1, gnlinksl
            call hash_table%get(gto(it), val, found)
@@ -10367,7 +10534,7 @@ end subroutine output_chrt2
         end do
         maxNum = maxval(num_a)
         num_a = 1
-      
+
         allocate(ind(kk))
         allocate(gToNodeOut(NLINKSL,maxNum+1))
         gToNodeOut = -99
@@ -10376,7 +10543,7 @@ end subroutine output_chrt2
         allocate(tmpLAKEIDA(kk))
         allocate(tmpOUTLAKEID(kk))
         allocate(tmpTO_NODE(kk))
-        
+
         if(kk .gt. 0) then
            tmpOUTLAKEID = -999
            tmpTYPEL = -999
@@ -10386,9 +10553,9 @@ end subroutine output_chrt2
            OUTLAKEID = -999
            TYPEL = -999
         endif
-        
+
         kk = 0
-        
+
         ! The following loops are replaced by a hashtable-based algorithm
         ! do m = 1, NLINKSL
         !          num = 1
@@ -10403,7 +10570,7 @@ end subroutine output_chrt2
         !              endif
         !           end do
         ! enddo
-        
+
         do it=1, gnlinksl
            call hash_table%get(gto(it), val, found)
            if(found .eqv. .true.) then
@@ -10415,12 +10582,12 @@ end subroutine output_chrt2
               num_a(val) = num_a(val) + 1
            end if
         end do
-        
+
         deallocate(num_a)
         call hash_table%clear()
-        
+
       end block
-      
+
       size2 = kk
       deallocate (gto)
 
@@ -10473,7 +10640,7 @@ end subroutine output_chrt2
        END DO
 
 !yw       call sum_int1d(LAKELINKID, NLAKES)
-       call updateLake_seqInt(LAKELINKID,nlakes,tmpLAKELINKID)
+       call updateLake_seqInt8(LAKELINKID,nlakes,tmpLAKELINKID)
 
        if(allocated(tmplakelinkid))  deallocate(tmpLAKELINKID)
 
@@ -10499,7 +10666,7 @@ end subroutine output_chrt2
 !     end do
 
        call TONODE2RSL(ind,tmpTYPEL,size2,gNLINKSL,NLINKSL,TYPEL(1:NLINKSL), -999 )
-       call TONODE2RSL(ind,tmpOUTLAKEID,size2,gNLINKSL,NLINKSL,OUTLAKEID(1:NLINKSL), -999 )
+       call TONODE2RSL8(ind,tmpOUTLAKEID,size2,gNLINKSL,NLINKSL,OUTLAKEID(1:NLINKSL), -999 )
 
 
  ! assign the the inflow nodes to the lank with a new TO_NODE id, which is the outflow link
@@ -10595,17 +10762,16 @@ end subroutine output_chrt2
     subroutine nhdLakeMap_scan(NLAKES, NLINKSL, LAKELINKID, TO_NODE,LINKID, LAKEIDM, LAKEIDA,GNLINKSL)
         !--- get the lake configuration here.
         implicit none
-        integer, dimension(NLAKES) :: LAKELINKID
-        integer, dimension(:),   intent(in) :: TO_NODE
-        integer, dimension(:),   intent(in) :: LINKID, LAKEIDA
-        integer, dimension(:),   intent(inout) :: LAKEIDM
+        integer(kind=int64), dimension(:), intent(in) :: TO_NODE
+        integer(kind=int64), dimension(NLAKES) :: LAKELINKID
+        integer(kind=int64), dimension(:),   intent(in) :: LINKID, LAKEIDA
+        integer(kind=int64), dimension(:),   intent(inout) :: LAKEIDM
         integer, intent(in) :: NLAKES, NLINKSL ,GNLINKSL
         integer :: i,size ,j,k, kk, num, maxNum, m, mm
-        integer, allocatable, dimension(:) :: ind,  &
-                    tmplakeida, tmpoutlakeid, tmpTO_NODE, gLAKEIDA
-        integer, allocatable, dimension(:,:) :: gtonodeout
-
-        integer,allocatable, dimension(:) ::  gto , tmpLAKELINKID, gtoLakeId_g, gtoLakeId
+        integer(kind=int64), allocatable, dimension(:) :: tmplakeida, tmpoutlakeid, gLAKEIDA, tmpTO_NODE, gto
+        integer(kind=int64), allocatable, dimension(:) :: ind
+        integer(kind=int64), allocatable, dimension(:,:) :: gtonodeout
+        integer(kind=int64), allocatable, dimension(:) ::  tmpLAKELINKID, gtoLakeId_g, gtoLakeId
 
 !       integer tmpBuf(GNLINKSL)
         integer, dimension(nlakes) :: lakemask
@@ -10642,14 +10808,14 @@ end subroutine output_chrt2
 
       block
         type(hash_t) :: hash_table
-        integer :: val,it
-        integer, allocatable :: num_a(:)
+        integer(kind=int64) :: val,it
+        integer(kind=int64), allocatable :: num_a(:)
         logical :: found
-        
+
         allocate(num_a(NLINKSL))
         num_a = 0
         kk = 0
-         
+
         call hash_table%set_all_idx(linkid, NLINKSL)
         do it=1, gnlinksl
            call hash_table%get(gto(it), val, found)
@@ -10661,15 +10827,15 @@ end subroutine output_chrt2
         end do
         maxNum = maxval(num_a)
         num_a = 1
-        
+
         allocate(ind(kk))
         allocate(gToNodeOut(NLINKSL,maxNum+1))
         gToNodeOut = -99
         allocate(tmpLAKEIDA(kk))
         allocate(tmpTO_NODE(kk))
-        
-        kk = 0 
-        
+
+        kk = 0
+
         ! The following loops are replaced by a hashtable-based algorithm
         ! do m = 1, NLINKSL
         !    num = 1
@@ -10684,7 +10850,7 @@ end subroutine output_chrt2
         !       endif
         !    end do
         ! end do
-        
+
         do it=1, gnlinksl
            call hash_table%get(gto(it), val, found)
            if(found .eqv. .true.) then
@@ -10696,12 +10862,12 @@ end subroutine output_chrt2
               num_a(val) = num_a(val) + 1
            end if
         end do
-        
+
         deallocate(num_a)
         call hash_table%clear()
-        
+
       end block
-         
+
       size = kk
       if(allocated(gto)) deallocate (gto)
 
@@ -10737,7 +10903,7 @@ end subroutine output_chrt2
 !yw        call match1dLake(LAKELINKID, NLAKES, -999)
 
 !yw double check
-      call combine_int1d(gtoLakeId_g,gnlinksl, -999)
+      call combine_int8_1d(gtoLakeId_g,gnlinksl, -999)
       call ReachLS_decomp(gtoLakeId_g,gtoLakeId)
 
        lakemask = 0
@@ -10778,7 +10944,7 @@ end subroutine output_chrt2
 !end double check
 
 
-       call updateLake_seqInt(LAKELINKID,nlakes,tmpLAKELINKID)
+       call updateLake_seqInt8(LAKELINKID,nlakes,tmpLAKELINKID)
 
 !      if(my_id .eq. 0) then
 !          write(65,*) "check LAKEIDM   *****,"
@@ -10813,7 +10979,8 @@ end subroutine output_chrt2
 
     implicit none
 
-    integer, dimension(:),  intent(in) :: inLINKID, inTYPEL
+    integer, dimension(:),  intent(in) :: inTYPEL
+    integer(kind=int64), dimension(:), intent(in) :: inLINKID
     integer, intent(in) :: inNLINKS
 
     integer            :: iret
@@ -10821,7 +10988,8 @@ end subroutine output_chrt2
     integer            :: linkdim
     character(len=256), parameter :: output_flnm = "LAKE_TYPES.nc"
 
-    integer, allocatable, dimension(:) :: linkId, typeL
+    integer, allocatable, dimension(:) :: typeL
+    integer(kind=int64), allocatable, dimension(:) :: linkId
 
 #ifdef MPP_LAND
 
@@ -10866,7 +11034,7 @@ end subroutine output_chrt2
        iret = nf90_def_dim(ncid, "link", inNLINKS, linkdim)
 
        !-- link  id
-       iret = nf90_def_var(ncid, "LINKID", NF90_INT, (/linkdim/), varid)
+       iret = nf90_def_var(ncid, "LINKID", NF90_INT64, (/linkdim/), varid)
        iret = nf90_put_att(ncid, varid, 'long_name', 'Link ID')
 
        !- lake reach type, var
@@ -11001,24 +11169,35 @@ subroutine hdtbl_out(did)
       call hdtbl_out_nc(did,ncid, count,count_flag,"SMCWLT1",rt_domain(did)%SMCWLT1,"",ixd,jxd)
       call hdtbl_out_nc(did,ncid, count,count_flag,"OV_ROUGH2D",rt_domain(did)%OV_ROUGH2D,"",ixd,jxd)
       call hdtbl_out_nc(did,ncid, count,count_flag,"LKSAT",rt_domain(did)%LKSAT,"",ixd,jxd)
+      call hdtbl_out_nc(did,ncid, count,count_flag,"NEXP",rt_domain(did)%NEXP,"",ixd,jxd)
    end do
 
 end subroutine hdtbl_out
 subroutine hdtbl_in_nc(did)
    implicit none
    integer :: did
-   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"SMCMAX1",rt_domain(did)%SMCMAX1)
-   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"SMCREF1",rt_domain(did)%SMCREF1)
-   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"SMCWLT1",rt_domain(did)%SMCWLT1)
-   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"OV_ROUGH2D",rt_domain(did)%OV_ROUGH2D)
-   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"LKSAT",rt_domain(did)%LKSAT)
+   integer :: ierr
+   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"SMCMAX1",rt_domain(did)%SMCMAX1,ierr)
+   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"SMCREF1",rt_domain(did)%SMCREF1,ierr)
+   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"SMCWLT1",rt_domain(did)%SMCWLT1,ierr)
+   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"OV_ROUGH2D",rt_domain(did)%OV_ROUGH2D,ierr)
+   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"LKSAT",rt_domain(did)%LKSAT,ierr)
+   call read2dlsm(did,trim(nlst(did)%hydrotbl_f),"NEXP",rt_domain(did)%NEXP,ierr)
+   ! Letting this variable be optional and setting to global default value if not found
+   if (ierr /= 0) then
+     write(6,*)  "WARNING (hydtbl_in_nc): NEXP not found so setting to global 1.0"
+     rt_domain(did)%NEXP = 1.0
+   endif
 end subroutine hdtbl_in_nc
-subroutine read2dlsm(did,file,varName,varOut)
+
+subroutine read2dlsm(did,file,varName,varOut,ierr)
+use module_mpp_land,only: mpp_land_bcast_int1
   implicit none
-  integer :: did, ncid ,ierr,iret
+  integer :: did, ncid , iret
   character(len=*) :: file,varName
   real,dimension(:,:) :: varOut
   character(len=256) :: units
+  integer, intent(out) :: ierr
 #ifdef MPP_LAND
   real,allocatable,dimension(:,:) :: tmpArr
   if(my_id .eq. io_id) then
@@ -11031,6 +11210,7 @@ subroutine read2dlsm(did,file,varName,varOut)
      allocate(tmpArr(1,1))
   endif
   call decompose_data_real (tmpArr,varOut)
+  call mpp_land_bcast_int1(ierr)
   deallocate(tmpArr)
 #else
      iret = nf90_open(trim(file), NF90_NOWRITE, ncid)

@@ -169,6 +169,13 @@ MODULE MODULE_SF_NOAHMPLSM
                       ! **0 -> No crop model, will run default dynamic vegetation
                       !   1 -> Liu, et al. 2016
 
+  INTEGER :: OPT_IMPERV  ! options for imperviousness infiltration adjustment
+                      !   0 -> no imperviousness adjustment
+                      !   1 -> use total imperviousness
+                      !   2 -> use effective imperviousness from Alley & Veenhuis
+                      ! **9 -> older model behavior (urban soil parameter adjustment 
+                      !        and mixed runoff adjustment depending on runoff scheme)
+
 !------------------------------------------------------------------------------------------!
 ! Physical Constants:                                                                      !
 !------------------------------------------------------------------------------------------!
@@ -303,6 +310,9 @@ MODULE MODULE_SF_NOAHMPLSM
      REAL :: BATS_NIR_DIR !cosz factor for direct NIR snow albedo Yang97 eqn. 16
      REAL :: RSURF_SNOW   !surface resistance for snow(s/m)
      REAL :: RSURF_EXP    !exponent in the shape parameter for soil resistance option 1
+     REAL :: IMPERV       !impervious fraction
+     REAL :: SCAMAX       !maximum fractional snow covered area (0.0-1.0)
+     REAL :: SWE_LIMIT    !maximum SWE limit (mm)
 
 !------------------------------------------------------------------------------------------!
 ! From the crop section of MPTABLE.TBL
@@ -361,6 +371,9 @@ MODULE MODULE_SF_NOAHMPLSM
      REAL :: DWSAT(NSOIL)  !saturated soil hydraulic diffusivity
      REAL :: QUARTZ(NSOIL) !soil quartz content
      REAL :: F1            !soil thermal diffusivity/conductivity coef (not used MB: 20140718)
+     REAL :: AXAJ          !Xinanjiang: Tension water distribution inflection parameter [-]
+     REAL :: BXAJ          !Xinanjiang: Tension water distribution shape parameter [-]
+     REAL :: XXAJ          !Xinanjiang: Free water distribution shape parameter [-]
 !------------------------------------------------------------------------------------------!
 ! From the GENPARM.TBL file
 !------------------------------------------------------------------------------------------!
@@ -1102,7 +1115,11 @@ ENDIF   ! CROPTYPE == 0
 
      IF(parameters%HVT> 0. .AND. parameters%HVT <= 1.0) THEN          !MB: change to 1.0 and 0.2 to reflect
        SNOWHC = parameters%HVT*EXP(-SNOWH/0.2)             !      changes to HVT in MPTABLE
-       FB     = MIN(SNOWH,SNOWHC)/SNOWHC
+       if (SNOWHC .le. SNOWH) then  ! AD: change this min to an if then since precision was leading to divide by 0s
+          FB = 1.
+       else 
+          FB = SNOWH/SNOWHC
+       endif
      ENDIF
 
      ELAI =  LAI*(1.-FB)
@@ -1819,7 +1836,7 @@ ENDIF   ! CROPTYPE == 0
      IF(SNOWH.GT.0.)  THEN
          BDSNO    = SNEQV / SNOWH
          FMELT    = (BDSNO/100.)**parameters%MFSNO
-         FSNO     = TANH( SNOWH /(2.5* Z0 * FMELT))
+         FSNO     = parameters%SCAMAX * TANH( SNOWH /(2.5* Z0 * FMELT))
      ENDIF
 
 ! ground roughness length
@@ -2952,7 +2969,7 @@ ENDIF   ! CROPTYPE == 0
         ALBSNI(2)=parameters%BATS_NIR_NEW*(1.-parameters%BATS_NIR_AGE*FAGE)        
 
         ALBSND(1)=ALBSNI(1)+parameters%BATS_VIS_DIR*FZEN*(1.-ALBSNI(1))    !  vis direct
-        ALBSND(2)=ALBSNI(2)+parameters%BATS_VIS_DIR*FZEN*(1.-ALBSNI(2))    !  nir direct
+        ALBSND(2)=ALBSNI(2)+parameters%BATS_NIR_DIR*FZEN*(1.-ALBSNI(2))    !  nir direct
 
   END SUBROUTINE SNOWALB_BATS
 
@@ -5841,7 +5858,7 @@ ENDIF   ! CROPTYPE == 0
           RUNSUB       = QDIS          !mm/s
        END IF
 
-       IF(OPT_RUN == 3 .or. OPT_RUN == 4) THEN 
+       IF(OPT_RUN == 3 .or. OPT_RUN == 4 .or. OPT_RUN == 7) THEN 
           RUNSUB       = RUNSUB + QDRAIN        !mm/s
        END IF
 
@@ -6091,9 +6108,9 @@ ENDIF   ! CROPTYPE == 0
 
 !to obtain equilibrium state of snow in glacier region
        
-   IF(SNEQV > 5000.) THEN   ! 5000 mm -> maximum water depth
+   IF(SNEQV > parameters%SWE_LIMIT) THEN   ! 5000 mm -> maximum water depth
       BDSNOW      = SNICE(0) / DZSNSO(0)
-      SNOFLOW     = (SNEQV - 5000.)
+      SNOFLOW     = (SNEQV - parameters%SWE_LIMIT)
       SNICE(0)    = SNICE(0)  - SNOFLOW 
       DZSNSO(0)   = DZSNSO(0) - SNOFLOW/BDSNOW
       SNOFLOW     = SNOFLOW / DT
@@ -6900,6 +6917,9 @@ ENDIF   ! CROPTYPE == 0
   REAL                                    :: SMCTOT !2-m averaged soil moisture (m3/m3)
   REAL                                    :: DZTOT  !2-m soil depth (m)
   REAL, PARAMETER :: A = 4.0
+
+  REAL                                    :: imperv_eff !local impervious adjustment (fraction, 0-1)
+
 ! ----------------------------------------------------------------------
     RUNSRF = 0.0
     PDDUM  = 0.0
@@ -6944,7 +6964,20 @@ ENDIF   ! CROPTYPE == 0
 !surface runoff and infiltration rate using different schemes
 
 !jref impermable surface at urban
-    IF ( parameters%urban_flag ) FCR(1)= 0.95
+! We are updating surface runoff adjustment as an area-mean
+! of impervious and frozen soil impermeable adjustments.
+    IF (OPT_IMPERV == 1) THEN
+       ! Use total imperviousness
+       imperv_eff = parameters%imperv
+       FCR(1) = imperv_eff + (1.0 - imperv_eff) * FCR(1)
+    ELSE IF (OPT_IMPERV == 2) THEN
+       ! Effective imperviousness from Alley & Veenhuis
+       imperv_eff = 0.0015 * ( (100. * parameters%imperv)**1.41 )
+       FCR(1) = imperv_eff + (1.0 - imperv_eff) * FCR(1)
+    ELSE IF (OPT_IMPERV == 9) THEN 
+       ! Fixed value for urban type (older configuration)
+       IF ( parameters%urban_flag ) FCR(1)=0.95
+    END IF
 
     IF(OPT_RUN == 1) THEN
        FFF = 6.0
@@ -6995,7 +7028,9 @@ ENDIF   ! CROPTYPE == 0
          PDDUM  = QINSUR - RUNSRF                       ! m/s
        END IF
     END IF
-
+    IF (OPT_RUN == 7) THEN
+      CALL COMPUTE_XAJ_SURFRUNOFF(parameters,DT,FCR,NSOIL,SMC,ZSOIL,QINSUR,RUNSRF,PDDUM)
+    END IF
 ! determine iteration times and finer time step
 
     NITER = 1
@@ -7018,6 +7053,11 @@ ENDIF   ! CROPTYPE == 0
           CALL INFIL (parameters,NSOIL  ,DTFINE     ,ZSOIL  ,SH2O   ,SICE   , & !in
                       SICEMAX,QINSUR ,                         & !in
                       PDDUM  ,RUNSRF )                           !out
+       END IF
+
+       IF (QINSUR > 0. .AND. OPT_RUN == 7) THEN
+          CALL COMPUTE_XAJ_SURFRUNOFF(parameters,DTFINE,FCR,NSOIL,SMC,ZSOIL,QINSUR,& ! in
+                                      RUNSRF,PDDUM)                                  ! out
        END IF
 
        CALL SRT   (parameters,NSOIL  ,ZSOIL  ,DTFINE ,PDDUM  ,ETRANI , & !in
@@ -7190,6 +7230,7 @@ ENDIF   ! CROPTYPE == 0
   REAL                     :: INFMAX
   REAL, DIMENSION(1:NSOIL) :: DMAX
   INTEGER, PARAMETER       :: CVFRZ = 3
+  REAL                     :: imperv_eff   !effective imperviousness
 ! --------------------------------------------------------------------------------
 
     IF (QINSUR >  0.0) THEN
@@ -7237,14 +7278,26 @@ ENDIF   ! CROPTYPE == 0
 
        INFMAX = INFMAX * FCR
 
-! jref for urban areas
-!       IF ( parameters%urban_flag ) INFMAX == INFMAX * 0.05
+! imperviousness adjustment
+
+       IF (OPT_IMPERV == 1) THEN
+         ! Use total imperviousness
+         imperv_eff = parameters%imperv
+       ELSE IF (OPT_IMPERV == 2) THEN
+         ! Effective imperviousness from Alley & Veenhuis
+         imperv_eff = 0.0015 * ( (100. * parameters%imperv)**1.41 )
+       ELSE ! options 0 and 9 both have no impervious adjustment
+         ! No imperviousness adjustment
+         imperv_eff = 0.0
+       END IF
+
+       RUNSRF = QINSUR * imperv_eff
 
        CALL WDFCND2 (parameters,WDF,WCND,SH2O(1),SICEMAX,1)
        INFMAX = MAX (INFMAX,WCND)
        INFMAX = MIN (INFMAX,PX)
 
-       RUNSRF= MAX(0., QINSUR - INFMAX)
+       RUNSRF = RUNSRF + MAX(0., (QINSUR * (1. - imperv_eff)) - INFMAX)
        PDDUM = QINSUR - RUNSRF
 
     END IF
@@ -7343,7 +7396,7 @@ ENDIF   ! CROPTYPE == 0
           IF(OPT_RUN == 1 .or. OPT_RUN == 2) THEN
              QDRAIN   = 0.
           END IF
-          IF(OPT_RUN == 3) THEN
+          IF(OPT_RUN == 3 .OR. OPT_RUN == 7) THEN
              QDRAIN   = parameters%SLOPE*WCND(K)
           END IF
           IF(OPT_RUN == 4) THEN
@@ -7510,6 +7563,82 @@ ENDIF   ! CROPTYPE == 0
     SMC = SH2O + SICE
 
   END SUBROUTINE SSTEP
+
+!== begin xinanjiag=================================================================================
+  SUBROUTINE COMPUTE_XAJ_SURFRUNOFF(parameters,DT,FCR,NSOIL,SMC,ZSOIL,QINSUR,RUNSRF,PDDUM)
+! ----------------------------------------------------------------------
+! Calculate the saturated area and runoff based on Xinanjiag runoff scheme.
+! Reference: Knoben, W. J., Freer, J. E., Fowler, K. J., Peel, M. C., & Woods, R. A. (2019). 
+! Modular Assessment of Rainfall-Runoff Models Toolbox (MARRMoT) v1. 2: 
+! an open-source, extendable framework providing implementations of 46 conceptual 
+! hydrologic models as continuous state-space formulations.
+! ----------------------------------------------------------------------
+! Author: Prasanth Valayamkunnath <prasanth@ucar.edu>
+! Date: August 03, 2020
+! ----------------------------------------------------------------------
+    IMPLICIT NONE
+! ----------------------------------------------------------------------
+! Inputs
+    TYPE (noahmp_parameters), INTENT(IN)   :: parameters
+    INTEGER,                  INTENT(IN)   :: NSOIL
+    REAL, DIMENSION(1:NSOIL), INTENT(IN)   :: SMC
+    REAL, DIMENSION(1:NSOIL), INTENT(IN)   :: ZSOIL
+    REAL, DIMENSION(1:NSOIL), INTENT(IN)   :: FCR      !fraction of imperviousness (-) = IMP
+    REAL                    , INTENT(IN)   :: QINSUR
+    REAL                    , INTENT(IN)   :: DT
+! Output
+    REAL                    , INTENT(INOUT):: RUNSRF
+    REAL                    , INTENT(INOUT):: PDDUM
+! local
+    REAL    :: WM,WM_MAX,SM,SM_MAX,IRUNOFF,PRUNOFF
+    INTEGER :: IZ
+!------------------------------------------------------------------------
+!initialize  
+    WM      = 0.0
+    WM_MAX  = 0.0
+    SM      = 0.0 
+    SM_MAX  = 0.0
+    IRUNOFF = 0.0
+    PRUNOFF = 0.0
+    RUNSRF  = 0.0
+
+    DO IZ=1,NSOIL-2
+       IF ((SMC(IZ)-parameters%SMCREF(IZ)) .GT. 0.) THEN ! soil moisture greater than field capacity
+          SM     = SM + (SMC(IZ) - parameters%SMCREF(IZ) )*-1*ZSOIL(IZ) !m
+          WM     = WM + (parameters%SMCREF(IZ)*-1*ZSOIL(IZ))            !m  
+       ELSE
+          WM     = WM + (SMC(IZ)*-1*ZSOIL(IZ))
+       END IF
+       WM_MAX = WM_MAX + (parameters%SMCREF(IZ)*-1*ZSOIL(IZ))
+       SM_MAX = SM_MAX + (parameters%SMCMAX(IZ) - parameters%SMCREF(IZ))*-1*ZSOIL(IZ)
+    END DO
+
+    WM = MIN(WM,WM_MAX) ! tension water (m) 
+    SM = MIN(SM,SM_MAX) ! free water (m)
+
+! impervious surface runoff R_IMP    
+    IRUNOFF = FCR(1)*QINSUR*DT
+
+! solve pervious surface runoff (m) based on Eq. (310)
+    IF ((WM/WM_MAX) .LE. (0.5-parameters%AXAJ))THEN
+       PRUNOFF = (1-FCR(1))*QINSUR*DT*((0.5-parameters%AXAJ)**(1-parameters%BXAJ))*((WM/WM_MAX)**parameters%BXAJ)
+    ELSE
+       PRUNOFF = (1-FCR(1))*QINSUR*DT*(1-(((0.5+parameters%AXAJ)**(1-parameters%BXAJ))*((1-(WM/WM_MAX))**parameters%BXAJ)))
+    END IF
+
+! estimate surface runoff based on Eq. (313)
+    IF(QINSUR .EQ. 0.0) THEN
+      RUNSRF  = 0.0
+    ELSE
+      RUNSRF = PRUNOFF*(1-((1-(SM/SM_MAX))**parameters%XXAJ))+IRUNOFF
+    END IF
+    RUNSRF = RUNSRF/DT !m/s
+    RUNSRF = MAX(0.0,    RUNSRF)
+    RUNSRF = MIN(QINSUR, RUNSRF)
+    PDDUM  = QINSUR - RUNSRF
+
+  END SUBROUTINE COMPUTE_XAJ_SURFRUNOFF
+!== end xinanjiag ==================================================================================
 
 !== begin wdfcnd1 ==================================================================================
 
@@ -8988,7 +9117,7 @@ END SUBROUTINE PSN_CROP
 
   subroutine noahmp_options(idveg     ,iopt_crs  ,iopt_btr  ,iopt_run  ,iopt_sfc  ,iopt_frz , & 
                              iopt_inf  ,iopt_rad  ,iopt_alb  ,iopt_snf  ,iopt_tbot, iopt_stc, &
-			     iopt_rsf , iopt_soil, iopt_pedo, iopt_crop )
+			     iopt_rsf , iopt_soil, iopt_pedo, iopt_crop, iopt_imperv )
 
   implicit none
 
@@ -9010,6 +9139,8 @@ END SUBROUTINE PSN_CROP
   INTEGER,  INTENT(IN) :: iopt_soil !soil parameters set-up option
   INTEGER,  INTENT(IN) :: iopt_pedo !pedo-transfer function (1->Saxton and Rawls)
   INTEGER,  INTENT(IN) :: iopt_crop !crop model option (0->none; 1->Liu et al.)
+  INTEGER,  INTENT(IN) :: iopt_imperv !imperviousness infiltration adjustment (0->none; 1->total imperviousness;
+                                           !2->Alley&Veenhuis)
 
 ! -------------------------------------------------------------------------------------------------
 
@@ -9030,6 +9161,7 @@ END SUBROUTINE PSN_CROP
   opt_soil = iopt_soil
   opt_pedo = iopt_pedo
   opt_crop = iopt_crop
+  opt_imperv = iopt_imperv
   
   end subroutine noahmp_options
  
@@ -9117,17 +9249,19 @@ MODULE NOAHMP_TABLES
 
     INTEGER            :: SLCATS
 
-    REAL :: BEXP_TABLE(MAX_SOILTYP)          !maximum intercepted h2o per unit lai+sai (mm)
+    REAL :: BEXP_TABLE(MAX_SOILTYP)        !maximum intercepted h2o per unit lai+sai (mm)
     REAL :: SMCDRY_TABLE(MAX_SOILTYP)      !characteristic leaf dimension (m)
-    REAL :: F1_TABLE(MAX_SOILTYP)         !momentum roughness length (m)
+    REAL :: F1_TABLE(MAX_SOILTYP)          !momentum roughness length (m)
     REAL :: SMCMAX_TABLE(MAX_SOILTYP)      !top of canopy (m)
     REAL :: SMCREF_TABLE(MAX_SOILTYP)      !bottom of canopy (m)
     REAL :: PSISAT_TABLE(MAX_SOILTYP)      !tree density (no. of trunks per m2)
     REAL :: DKSAT_TABLE(MAX_SOILTYP)       !tree crown radius (m)
     REAL :: DWSAT_TABLE(MAX_SOILTYP)       !monthly stem area index, one-sided
     REAL :: SMCWLT_TABLE(MAX_SOILTYP)      !monthly leaf area index, one-sided
-    REAL :: QUARTZ_TABLE(MAX_SOILTYP)         !single-side leaf area per Kg [m2/kg]
-
+    REAL :: QUARTZ_TABLE(MAX_SOILTYP)      !single-side leaf area per Kg [m2/kg]
+    REAL :: AXAJ_TABLE(MAX_SOILTYP)        !Xinanjiang: Tension water distribution inflection parameter [-]
+    REAL :: BXAJ_TABLE(MAX_SOILTYP)        !Xinanjiang: Tension water distribution shape parameter [-] 
+    REAL :: XXAJ_TABLE(MAX_SOILTYP)        !Xinanjiang: Free water distribution shape parameter [-]
 ! GENPARM.TBL parameters
 
     REAL :: SLOPE_TABLE(9)    !slope factor for soil drainage
@@ -9173,6 +9307,9 @@ MODULE NOAHMP_TABLES
     REAL :: BATS_NIR_DIR_TABLE  !cosz factor for direct NIR snow albedo Yang97 eqn. 16
     REAL :: RSURF_SNOW_TABLE    !surface resistance for snow(s/m)
     REAL :: RSURF_EXP_TABLE    !exponent in the shape parameter for soil resistance option 1
+    REAL :: IMPERV_URBAN_TABLE  !imperviousness fraction
+    REAL :: SCAMAX_TABLE        !maximum fractional snow covered area (0.0-1.0)
+    REAL :: SWE_LIMIT_TABLE     !maximum SWE limit (mm)
 
 ! MPTABLE.TBL crop parameters
 
@@ -9532,8 +9669,10 @@ CONTAINS
        FRZK_TABLE = -1.E36
        ZBOT_TABLE = -1.E36
        CZIL_TABLE = -1.E36
-
-!
+       AXAJ_TABLE = -1.E36
+       BXAJ_TABLE = -1.E36
+       XXAJ_TABLE = -1.E36
+! 
 !-----READ IN SOIL PROPERTIES FROM SOILPARM.TBL
 !
     inquire( file='SOILPARM.TBL', exist=file_named ) 
@@ -9560,7 +9699,8 @@ CONTAINS
     DO LC=1,SLCATS
       READ (21,*) ITMP,BEXP_TABLE(LC),SMCDRY_TABLE(LC),F1_TABLE(LC),SMCMAX_TABLE(LC),    &
                   SMCREF_TABLE(LC),PSISAT_TABLE(LC),DKSAT_TABLE(LC), DWSAT_TABLE(LC),   &
-                  SMCWLT_TABLE(LC), QUARTZ_TABLE(LC)
+                  SMCWLT_TABLE(LC), QUARTZ_TABLE(LC), AXAJ_TABLE (LC), BXAJ_TABLE (LC), &
+                  XXAJ_TABLE(LC)
     ENDDO
 
     CLOSE (21)
@@ -9675,12 +9815,12 @@ CONTAINS
     REAL :: CO2,O2,TIMEAN,FSATMX,Z0SNO,SSI,SNOW_RET_FAC, &
             SWEMX,TAU0,GRAIN_GROWTH,EXTRA_GROWTH,DIRT_SOOT,&
 	    BATS_COSZ,BATS_VIS_NEW,BATS_NIR_NEW,BATS_VIS_AGE,BATS_NIR_AGE,BATS_VIS_DIR,BATS_NIR_DIR,&
-	    RSURF_SNOW,RSURF_EXP
+	    RSURF_SNOW,RSURF_EXP,IMPERV_URBAN,SWE_LIMIT,SCAMAX
 
     NAMELIST / noahmp_global_parameters / CO2,O2,TIMEAN,FSATMX,Z0SNO,SSI,SNOW_RET_FAC, &
             SWEMX,TAU0,GRAIN_GROWTH,EXTRA_GROWTH,DIRT_SOOT,&
 	    BATS_COSZ,BATS_VIS_NEW,BATS_NIR_NEW,BATS_VIS_AGE,BATS_NIR_AGE,BATS_VIS_DIR,BATS_NIR_DIR,&
-	    RSURF_SNOW,RSURF_EXP
+	    RSURF_SNOW,RSURF_EXP,IMPERV_URBAN,SWE_LIMIT,SCAMAX
 
 
     ! Initialize our variables to bad values, so that if the namelist read fails, we come to a screeching halt as soon as we try to use anything.
@@ -9705,6 +9845,9 @@ BATS_VIS_DIR_TABLE   = -1.E36
 BATS_NIR_DIR_TABLE   = -1.E36
 RSURF_SNOW_TABLE     = -1.E36
  RSURF_EXP_TABLE     = -1.E36
+IMPERV_URBAN_TABLE   = -1.E36
+    SCAMAX_TABLE     = -1.E36
+ SWE_LIMIT_TABLE     = -1.E36
 
     inquire( file='MPTABLE.TBL', exist=file_named ) 
     if ( file_named ) then
@@ -9742,6 +9885,9 @@ BATS_VIS_DIR_TABLE   = BATS_VIS_DIR
 BATS_NIR_DIR_TABLE   = BATS_NIR_DIR
 RSURF_SNOW_TABLE     = RSURF_SNOW
  RSURF_EXP_TABLE     = RSURF_EXP
+IMPERV_URBAN_TABLE   = IMPERV_URBAN
+    SCAMAX_TABLE     = SCAMAX
+ SWE_LIMIT_TABLE     = SWE_LIMIT
 
   end subroutine read_mp_global_parameters
 
